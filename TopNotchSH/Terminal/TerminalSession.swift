@@ -50,6 +50,16 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable {
 
     var displayTitle: String { customName ?? title }
 
+    /// When the user last typed into this terminal.
+    private(set) var lastInputAt = Date.distantPast
+
+    /// Whether a command, rather than the shell's prompt, is in the foreground.
+    var isRunningCommand: Bool {
+        guard let process, process.childfd >= 0, process.shellPid > 0 else { return false }
+        let foreground = tcgetpgrp(process.childfd)
+        return foreground > 0 && foreground != process.shellPid
+    }
+
     /// Called once the shell process exits.
     var onExit: (() -> Void)?
 
@@ -424,6 +434,7 @@ extension TerminalSession: LocalProcessDelegate {
 extension TerminalSession: TerminalViewDelegate {
     nonisolated func send(source: TerminalView, data: ArraySlice<UInt8>) {
         MainActor.assumeIsolated {
+            lastInputAt = Date()
             if scrollFollow.userDidType() {
                 view.scroll(toPosition: 1)
                 updateScrollerVisibility()
@@ -461,8 +472,16 @@ extension TerminalSession: TerminalViewDelegate {
         }
     }
 
+    /// Links come from whatever a program prints, including remote hosts over
+    /// SSH, so only ordinary web, mail and file links are opened.
+    nonisolated static let openableLinkSchemes: Set<String> = ["http", "https", "mailto", "file"]
+
     nonisolated func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
-        guard let url = URL(string: link) else { return }
+        guard let url = URL(string: link), let scheme = url.scheme?.lowercased(),
+              Self.openableLinkSchemes.contains(scheme) else {
+            DispatchQueue.main.async { NSSound.beep() }
+            return
+        }
         DispatchQueue.main.async { NSWorkspace.shared.open(url) }
     }
 

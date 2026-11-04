@@ -80,6 +80,7 @@ private struct GeneralPage: View {
                 Toggle("Reopen tabs after restart", isOn: store.binding(\.general.restoreTabs))
                 Caption("Tabs come back in their last folders, with their names. Running programs can't be restored.")
             }
+            UpdatesSection()
             Section("Privacy") {
                 Toggle("Hide from screen sharing and recordings", isOn: store.binding(\.general.hideFromScreenSharing))
                 Caption("Also available from the menu bar icon, for quick switching before a call.")
@@ -101,6 +102,49 @@ private struct GeneralPage: View {
             } footer: {
                 Caption("When this happens in a tab you aren't looking at, the closed notch widens to show an indicator and the tab gets a dot.")
             }
+        }
+    }
+}
+
+private struct UpdatesSection: View {
+    @EnvironmentObject private var store: SettingsStore
+    @EnvironmentObject private var updates: UpdateController
+
+    private var version: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+    }
+
+    var body: some View {
+        Section {
+            Picker("Updates", selection: store.binding(\.updates.policy)) {
+                ForEach(UpdatePolicy.allCases) { Text($0.title).tag($0) }
+            }
+            Caption(store.settings.updates.policy.detail)
+
+            if let ready = updates.readyVersion {
+                HStack {
+                    Label("Version \(ready) is ready to install.", systemImage: "arrow.down.circle.fill")
+                        .foregroundStyle(.green)
+                    Spacer()
+                    Button("Restart and Install") { updates.installReadyUpdate() }
+                }
+            }
+
+            HStack {
+                Text("Version \(version)")
+                if let lastCheck = updates.lastCheck {
+                    Text("· checked \(lastCheck, format: .relative(presentation: .named))")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Check Now") { updates.checkForUpdates() }
+                    .disabled(!updates.canCheckForUpdates)
+            }
+            if !updates.isAvailable {
+                Caption("Development builds don't update themselves.")
+            }
+        } header: {
+            Text("Updates")
         }
     }
 }
@@ -364,6 +408,7 @@ private struct ThemePreview: View {
 
 private struct HotkeysPage: View {
     @EnvironmentObject private var store: SettingsStore
+    @EnvironmentObject private var hotkeyStatus: HotkeyStatus
 
     var body: some View {
         Form {
@@ -375,6 +420,9 @@ private struct HotkeysPage: View {
                             Spacer()
                             HotkeyRecorder(chord: binding(for: action))
                         }
+                    }
+                    if scope == .global, let problem = hotkeyStatus.problem {
+                        ShortcutProblem(text: problem)
                     }
                     if scope == .notch {
                         LabeledContent("Switch to tab 1–9") { Text("⌘1 … ⌘9").foregroundStyle(.secondary) }

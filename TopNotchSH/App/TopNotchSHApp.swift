@@ -12,6 +12,8 @@ struct TopNotchSHApp: App {
             Divider()
             Button("Settings…") { delegate.model.perform(.showSettings) }
                 .keyboardShortcut(",")
+            Button("Check for Updates…") { delegate.model.updates.checkForUpdates() }
+            Button("Getting Started…") { delegate.model.showWelcome() }
             Divider()
             Button("Quit Top NotchSH") { NSApp.terminate(nil) }
                 .keyboardShortcut("q")
@@ -45,7 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     func applicationDidFinishLaunching(_ notification: Notification) {
         #if DEBUG
         if SelfTest.isRequested {
-            model.start(registeringGlobalHotkey: false)
+            model.start(registeringGlobalHotkey: false, showingWelcome: false)
             SelfTest(model: model).start()
             return
         }

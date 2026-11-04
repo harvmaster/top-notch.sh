@@ -7,10 +7,18 @@ import Foundation
 struct ConfigDirectory {
     let url: URL
 
-    static let standard = ConfigDirectory(
+    static let standard = override ?? ConfigDirectory(
         url: FileManager.default.homeDirectoryForCurrentUser
             .appending(path: ".config/top-notchsh", directoryHint: .isDirectory)
     )
+
+    /// `TOPNOTCHSH_CONFIG_DIR` points the app at another folder, e.g. to try
+    /// a build without touching your own configuration.
+    static var override: ConfigDirectory? {
+        ProcessInfo.processInfo.environment["TOPNOTCHSH_CONFIG_DIR"].map {
+            ConfigDirectory(url: URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true))
+        }
+    }
 
     var settings: ConfigFile<AppSettings> { file("settings.json") }
     var workspaces: ConfigFile<[WorkspaceRecord]> { file("workspaces.json") }

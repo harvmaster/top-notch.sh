@@ -16,7 +16,12 @@
 # Notarization uses the keychain profile "top-notchsh". Create it once with:
 #   xcrun notarytool store-credentials top-notchsh --apple-id you@example.com --team-id TEAMID
 #
-# Output: dist/TopNotchSH-<version>.dmg
+# Sparkle updates are signed with the keychain key "top-notchsh" (created with
+# Sparkle's generate_keys --account top-notchsh); its public key is in project.yml.
+#
+# Output: dist/TopNotchSH-<version>.dmg and dist/appcast.xml. Upload both to
+# the GitHub release tagged v<version>; installed copies find the update
+# through the appcast attached to the latest release.
 set -euo pipefail
 
 NOTARIZE=1
@@ -35,7 +40,10 @@ BUILD_DIR="$ROOT/build/release"
 WORK_DIR="$BUILD_DIR/package"
 DIST_DIR="$ROOT/dist"
 ENTITLEMENTS="$ROOT/TopNotchSH/Resources/TopNotchSH.entitlements"
-VERSION="$(sed -n 's/^ *CFBundleShortVersionString: *"\(.*\)"/\1/p' "$ROOT/project.yml")"
+setting() { sed -n "s/^ *$1: *\"\{0,1\}\([^\"]*\)\"\{0,1\} *$/\1/p" "$ROOT/project.yml" | head -1; }
+VERSION="$(setting MARKETING_VERSION)"
+REPOSITORY="$(setting GITHUB_REPOSITORY)"
+[[ -n "$VERSION" && -n "$REPOSITORY" ]] || { echo "MARKETING_VERSION and GITHUB_REPOSITORY must be set in project.yml" >&2; exit 1; }
 DMG="$DIST_DIR/TopNotchSH-$VERSION.dmg"
 
 step() { printf '\n\033[1m▸ %s\033[0m\n' "$*"; }
@@ -107,8 +115,19 @@ rm -rf "$WORK_DIR"
 mkdir -p "$STAGING"
 ditto "$BUILT_APP" "$STAGING/$APP_NAME.app"
 
-SIGN_ARGS=(--force --options runtime --entitlements "$ENTITLEMENTS" --sign "$IDENTITY")
-[[ $DISTRIBUTABLE -eq 1 ]] && SIGN_ARGS+=(--timestamp)
+# Nested code is signed inside-out before the app. Sparkle's XPC services
+# are only used by sandboxed apps, so they are left out.
+NESTED_ARGS=(--force --options runtime --sign "$IDENTITY")
+[[ $DISTRIBUTABLE -eq 1 ]] && NESTED_ARGS+=(--timestamp)
+SPARKLE="$STAGING/$APP_NAME.app/Contents/Frameworks/Sparkle.framework"
+if [[ -d "$SPARKLE" ]]; then
+  rm -rf "$SPARKLE/XPCServices" "$SPARKLE/Versions/B/XPCServices"
+  codesign "${NESTED_ARGS[@]}" "$SPARKLE/Versions/B/Autoupdate"
+  codesign "${NESTED_ARGS[@]}" "$SPARKLE/Versions/B/Updater.app"
+  codesign "${NESTED_ARGS[@]}" "$SPARKLE"
+fi
+
+SIGN_ARGS=("${NESTED_ARGS[@]}" --entitlements "$ENTITLEMENTS")
 codesign "${SIGN_ARGS[@]}" "$STAGING/$APP_NAME.app"
 codesign --verify --strict --deep --verbose=1 "$STAGING/$APP_NAME.app"
 
@@ -198,7 +217,22 @@ if [[ $NOTARIZE -eq 1 ]]; then
   spctl --assess --type open --context context:primary-signature --verbose "$DMG"
 fi
 
-step "Done: ${DMG#"$ROOT"/}"
+# --- Update feed ----------------------------------------------------------------
+
+step "Generating the update feed"
+FEED_DIR="$WORK_DIR/feed"
+mkdir -p "$FEED_DIR"
+cp "$DMG" "$FEED_DIR/"
+"$BUILD_DIR/derived/SourcePackages/artifacts/sparkle/Sparkle/bin/generate_appcast" \
+  --account top-notchsh \
+  --download-url-prefix "${DOWNLOAD_URL_PREFIX:-https://github.com/$REPOSITORY/releases/download/v$VERSION/}" \
+  --full-release-notes-url "https://github.com/$REPOSITORY/releases/tag/v$VERSION" \
+  --link "https://github.com/$REPOSITORY" \
+  -o "$DIST_DIR/appcast.xml" \
+  "$FEED_DIR" >/dev/null
+
+step "Done: ${DMG#"$ROOT"/} and dist/appcast.xml"
+printf '  Publish: create the GitHub release v%s in %s and attach both files.\n' "$VERSION" "$REPOSITORY"
 if [[ $NOTARIZE -eq 0 ]]; then
   if [[ $DISTRIBUTABLE -eq 1 ]]; then
     warn "Signed for distribution but not notarized; other Macs will warn when opening it."

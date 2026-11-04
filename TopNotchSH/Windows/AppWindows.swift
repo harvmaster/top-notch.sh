@@ -125,6 +125,12 @@ final class PopoutWindows: NSObject, NSWindowDelegate {
         ActivationPolicy.present(window)
     }
 
+    /// Terminals living in pop-out windows.
+    var openSessions: [TerminalSession] { Array(sessions.values) }
+
+    /// Whether the user is working in a pop-out window right now.
+    var isInUse: Bool { windows.values.contains { $0.isKeyWindow } }
+
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
         let key = ObjectIdentifier(window)

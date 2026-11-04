@@ -42,6 +42,8 @@ final class SelfTest {
         Task { @MainActor in
             if ProcessInfo.processInfo.arguments.contains("--memory") {
                 await measureMemory()
+            } else if ProcessInfo.processInfo.arguments.contains("--screenshots") {
+                await captureReadmeImages()
             } else {
                 await run()
             }
@@ -81,7 +83,7 @@ final class SelfTest {
 
         // Global hotkey registration (a spare chord; ⌘⏎ may belong to another app)
         let hotkey = GlobalHotkey()
-        check("global hotkey registers with Carbon", hotkey.register(KeyChord([.command, .option, .control], kVK_F12)))
+        check("global hotkey registers with Carbon", hotkey.register(KeyChord([.command, .option, .control], kVK_F12)) == .registered)
         hotkey.invalidate()
 
         // Open
@@ -355,7 +357,9 @@ final class SelfTest {
                 window.contentView = NSHostingView(rootView: SettingsView(page: page)
                     .environmentObject(model.settings)
                     .environmentObject(model.workspaces)
-                    .environmentObject(model.coordinator))
+                    .environmentObject(model.coordinator)
+                    .environmentObject(model.input.hotkeyStatus)
+                    .environmentObject(model.updates))
                 await sleep(0.5)
                 await screenshot("09-settings-\(page.rawValue)")
             }
@@ -382,6 +386,109 @@ final class SelfTest {
         model.perform(.toggleNotch)
         _ = await until { !notch.isOpen }
         await sleep(0.8)
+    }
+
+    // MARK: - README screenshots
+
+    /// Captures windows on their own (transparent background), so nothing
+    /// else on the screen ends up in the image.
+    private func captureWindow(_ window: NSWindow, _ name: String, shadow: Bool = true) async {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        process.arguments = ["-x"] + (shadow ? [] : ["-o"]) + ["-l", "\(window.windowNumber)", output.appendingPathComponent("\(name).png").path]
+        try? process.run()
+        process.waitUntilExit()
+        log("captured \(name)")
+    }
+
+    /// Captures a strip of the screen (top-left origin, in points).
+    private func captureRegion(_ rect: CGRect, _ name: String) async {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        process.arguments = ["-x", "-R", "\(Int(rect.minX)),\(Int(rect.minY)),\(Int(rect.width)),\(Int(rect.height))", output.appendingPathComponent("\(name).png").path]
+        try? process.run()
+        process.waitUntilExit()
+        log("captured \(name)")
+    }
+
+    /// Sets up a representative scene for the README. Run with a neutral
+    /// ZDOTDIR so the shell prompt shows no personal details.
+    private func captureReadmeImages() async {
+        let settings = model.settings
+        let demoFolder = ProcessInfo.processInfo.environment["TOPNOTCHSH_DEMO_FOLDER"] ?? NSHomeDirectory()
+        settings.update {
+            $0.sizing.openWidth = 760
+            $0.sizing.openHeight = 400
+            $0.activity.minimumCommandSeconds = 1
+            $0.general.hasSeenWelcome = true
+        }
+        await sleep(1)
+        guard let notch = model.coordinator.controllers.values.first else { return }
+        model.perform(.toggleNotch)
+        _ = await until { notch.isOpen && notch.panel.isKeyWindow }
+        let workspace = notch.workspace
+        let main = workspace.activeTab!
+        _ = await until(5) { !self.text(main).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+        // Background tabs: one rings the bell so its activity dot shows.
+        workspace.renameTab(main.id, to: "top-notchsh")
+        await key(kVK_ANSI_T, .command)
+        _ = await until { workspace.tabs.count == 2 }
+        let server = workspace.activeTab!
+        workspace.renameTab(server.id, to: "server")
+        _ = await until(5) { !self.text(server).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        await type("clear; sleep 1; printf '\\a'\r")
+        await key(kVK_ANSI_T, .command)
+        _ = await until { workspace.tabs.count == 3 }
+        workspace.renameTab(workspace.activeTab!.id, to: "notes")
+        await key(kVK_ANSI_1, .command)
+        _ = await until { workspace.activeTab === main && notch.panel.firstResponder === main.view }
+
+        // The main tab: a project listing and its history.
+        await type("cd '\(demoFolder)' && clear\r")
+        await sleep(0.5)
+        await type("ls -lgoh\r")
+        await sleep(0.4)
+        await type("git status -sb\r")
+        _ = await until(4) { server.activity == .bell }
+        await sleep(1)
+        main.view.selectNone()
+        await captureWindow(notch.panel, "notch-open")
+
+        // Closed notch showing that a command finished.
+        await type("sleep 2\r")
+        await sleep(0.4)
+        model.perform(.toggleNotch)
+        _ = await until(6) { !notch.isOpen && notch.activity == .finished }
+        await sleep(1.2)
+        let screen = notch.geometry.frame
+        let panel = notch.panel.frame
+        await captureRegion(CGRect(x: panel.midX - screen.minX - 220, y: 0, width: 440, height: 56), "notch-activity")
+
+        // Settings and the welcome window.
+        model.perform(.showSettings)
+        _ = await until { NSApp.keyWindow?.identifier == SettingsWindow.identifier }
+        if let window = NSApp.keyWindow {
+            window.contentView = NSHostingView(rootView: SettingsView(page: .terminal)
+                .environmentObject(model.settings)
+                .environmentObject(model.workspaces)
+                .environmentObject(model.coordinator)
+                .environmentObject(model.input.hotkeyStatus)
+                .environmentObject(model.updates))
+            await sleep(1)
+            await captureWindow(window, "settings")
+            window.performClose(nil)
+        }
+        settings.update { $0.general.hasSeenWelcome = false }
+        model.showWelcome()
+        let welcome: () -> NSWindow? = { NSApp.windows.first { $0.title == "Welcome to Top NotchSH" && $0.isVisible } }
+        _ = await until { welcome() != nil }
+        await sleep(1)
+        if let window = welcome() {
+            await captureWindow(window, "welcome")
+            window.performClose(nil)
+        }
+        await sleep(0.5)
     }
 
     // MARK: - Memory report
@@ -638,6 +745,38 @@ final class SelfTest {
         check("saved tabs remember their folders", records.allSatisfy { $0.directory != nil })
         workspace.renameTab(tab1.id, to: nil)
         settings.update { $0.activity.minimumCommandSeconds = ActivitySettings().minimumCommandSeconds }
+
+        // Global shortcut conflicts are detected
+        let spare = KeyChord([.command, .option, .control], kVK_F12)
+        let holder = GlobalHotkey()
+        let contender = GlobalHotkey()
+        check("an unused shortcut registers", holder.register(spare) == .registered)
+        check("a shortcut held by someone else is reported", contender.register(spare) == .takenByAnotherApp)
+        holder.invalidate()
+        contender.invalidate()
+        check("the new default ⌃` is free on this Mac", !SystemShortcuts.isReserved(HotkeyAction.toggleNotch.defaultChord))
+        log("  ⌘` (cycle windows) reported as a macOS shortcut: \(SystemShortcuts.isReserved(KeyChord(.command, kVK_ANSI_Grave)))")
+
+        // Only ordinary links open
+        check("web, mail and file links are allowed", ["http", "https", "mailto", "file"].allSatisfy(TerminalSession.openableLinkSchemes.contains))
+        check("other URL schemes are refused", !TerminalSession.openableLinkSchemes.contains("x-apple-systempreferences"))
+
+        // Welcome window
+        settings.update { $0.general.hasSeenWelcome = false }
+        model.showWelcome()
+        let welcome: () -> NSWindow? = { NSApp.windows.first { $0.title == "Welcome to Top NotchSH" && $0.isVisible } }
+        check("welcome window appears", await until { welcome() != nil })
+        await sleep(0.6)
+        await screenshot("18-welcome")
+        welcome()?.performClose(nil)
+        check("closing the welcome window marks it seen", await until { settings.settings.general.hasSeenWelcome })
+        await sleep(0.4)
+        // The welcome window took focus, which closes the notch; reopen it.
+        if !notch.isOpen {
+            model.perform(.toggleNotch)
+        }
+        notch.focus()
+        _ = await until { notch.isOpen && notch.panel.firstResponder === tab1.view }
     }
 
     private func hostWindow(of session: TerminalSession) -> NSWindow? {

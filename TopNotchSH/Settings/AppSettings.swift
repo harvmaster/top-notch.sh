@@ -11,6 +11,7 @@ struct AppSettings: Codable, Equatable {
     var padding = PaddingSettings()
     var appearance = AppearanceSettings()
     var activity = ActivitySettings()
+    var updates = UpdateSettings()
     var motion = MotionSettings()
     var terminal = TerminalSettings()
     var hotkeys = HotkeyAction.defaultBindings
@@ -29,6 +30,48 @@ struct GeneralSettings: Codable, Equatable {
     var restoreTabs = true
     /// Keep notch and pop-out windows out of screen sharing and recordings.
     var hideFromScreenSharing = false
+    /// The welcome window has been shown once.
+    var hasSeenWelcome = false
+}
+
+// MARK: - Updates
+
+enum UpdatePolicy: String, Codable, CaseIterable, Identifiable {
+    /// Check daily and ask before installing.
+    case ask
+    /// Download in the background and install (relaunching) right away.
+    case automatic
+    /// Download in the background and install once nothing is in use.
+    case whenIdle
+    /// Only check when asked to.
+    case manual
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .ask: "Ask before updating"
+        case .automatic: "Install automatically"
+        case .whenIdle: "Install automatically when idle"
+        case .manual: "Check manually"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .ask: "Checks daily and shows what's new before installing."
+        case .automatic: "Downloads in the background, then relaunches to install. Running commands are stopped."
+        case .whenIdle: "Downloads in the background, then installs once every terminal is at its prompt and you've stopped typing."
+        case .manual: "Only checks when you choose Check for Updates."
+        }
+    }
+
+    var checksAutomatically: Bool { self != .manual }
+    var downloadsAutomatically: Bool { self == .automatic || self == .whenIdle }
+}
+
+struct UpdateSettings: Codable, Equatable {
+    var policy = UpdatePolicy.ask
 }
 
 /// What makes the closed notch light up for a tab you are not looking at.

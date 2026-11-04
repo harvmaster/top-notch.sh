@@ -14,6 +14,8 @@ final class InputRouter {
     private let workspaces: WorkspaceStore
     private let perform: (Command) -> Void
     private let globalHotkey = GlobalHotkey()
+    /// Whether the global toggle shortcut is working, for the UI.
+    let hotkeyStatus = HotkeyStatus()
     private var monitor: Any?
     private var subscription: AnyCancellable?
     private var recorderObserver: AnyCancellable?
@@ -30,7 +32,7 @@ final class InputRouter {
             subscription = settings.publisher(\.hotkeys)
                 .map { $0[.toggleNotch] ?? HotkeyAction.toggleNotch.defaultChord }
                 .removeDuplicates()
-                .sink { [weak self] in self?.globalHotkey.register($0) }
+                .sink { [weak self] in self?.registerGlobalHotkey($0) }
             recorderObserver = NotificationCenter.default.publisher(for: ChordListener.isListeningDidChange)
                 .compactMap { $0.userInfo?["isListening"] as? Bool }
                 .sink { [weak self] in self?.setGlobalHotkeySuspended($0) }
@@ -57,7 +59,15 @@ final class InputRouter {
         if suspended {
             globalHotkey.unregister()
         } else if subscription != nil {
-            globalHotkey.register(settings.settings.chord(for: .toggleNotch))
+            registerGlobalHotkey(settings.settings.chord(for: .toggleNotch))
+        }
+    }
+
+    private func registerGlobalHotkey(_ chord: KeyChord) {
+        let status = globalHotkey.register(chord)
+        hotkeyStatus.record(status, for: chord)
+        if status != .registered {
+            NSLog("Top NotchSH: global shortcut %@ may not work: %@", chord.displayString, String(describing: status))
         }
     }
 

@@ -225,6 +225,10 @@ final class NotchCoordinator: ObservableObject {
         return [screens.first { $0.safeAreaInsets.top > 0 } ?? screens.first].compactMap { $0 }
     }
 
+    var isAnyNotchOpen: Bool {
+        controllers.values.contains(where: \.isOpen)
+    }
+
     private var focusedNotch: NotchController? {
         controllers.values.first { $0.isOpen && $0.isKey }
     }

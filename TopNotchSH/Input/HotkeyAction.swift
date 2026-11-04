@@ -70,7 +70,7 @@ enum HotkeyAction: String, CaseIterable, Codable, CodingKeyRepresentable, Identi
 
     var defaultChord: KeyChord {
         switch self {
-        case .toggleNotch: .command(kVK_Return)
+        case .toggleNotch: KeyChord(.control, kVK_ANSI_Grave)
         case .newTab: .command(kVK_ANSI_T)
         case .closeTab: .command(kVK_ANSI_W)
         case .reopenClosedTab: .commandShift(kVK_ANSI_T)

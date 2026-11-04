@@ -6,6 +6,10 @@ options:
   xcodeVersion: "16.0"
 settings:
   base:
+    # The release version. Also the build number, which Sparkle compares.
+    MARKETING_VERSION: "0.1.0"
+    # Where releases (DMG + appcast.xml) are published.
+    GITHUB_REPOSITORY: harvmaster/top-notchsh
     SWIFT_VERSION: "5.0"
     MACOSX_DEPLOYMENT_TARGET: "14.0"
     # Apple silicon only.
@@ -20,6 +24,9 @@ packages:
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm.git
     minorVersion: "1.20.0"
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    majorVersion: "2.6.0"
 schemes:
   TopNotchSH:
     build:
@@ -45,6 +52,7 @@ targets:
           - Resources/Info.plist
     dependencies:
       - package: SwiftTerm
+      - package: Sparkle
       - sdk: Carbon.framework
     info:
       path: TopNotchSH/Resources/Info.plist
@@ -53,11 +61,15 @@ targets:
         CFBundleDisplayName: Top NotchSH
         CFBundleIdentifier: "$(PRODUCT_BUNDLE_IDENTIFIER)"
         CFBundleExecutable: "$(EXECUTABLE_NAME)"
-        CFBundleVersion: "1"
-        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "$(MARKETING_VERSION)"
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundlePackageType: APPL
         LSMinimumSystemVersion: "14.0"
         LSUIElement: true
+        # Sparkle: the update feed is attached to every GitHub release, and only
+        # updates signed with the matching private key are accepted.
+        SUFeedURL: "https://github.com/$(GITHUB_REPOSITORY)/releases/latest/download/appcast.xml"
+        SUPublicEDKey: K6E1Ss9GtXwtZzYQLyRorJIv+QnfjOuR4MWx9rqwMxs=
         NSHumanReadableCopyright: "Copyright © 2026 Harvey Zuccon. Released under the MIT License."
         # Shown in macOS permission prompts when a command run in the terminal
         # needs access; macOS attributes these requests to the terminal app.

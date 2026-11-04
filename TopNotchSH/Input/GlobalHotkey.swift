@@ -29,15 +29,34 @@ final class GlobalHotkey {
         )
     }
 
+    enum Status: Equatable {
+        case registered
+        /// A macOS shortcut (Spotlight, Mission Control, …) uses this chord and wins.
+        case systemShortcut
+        /// Another app holds this chord exclusively.
+        case takenByAnotherApp
+        case failed(OSStatus)
+    }
+
+    /// Registers exclusively, so other apps can't take the chord afterwards
+    /// and an app already holding it is detected.
     @discardableResult
-    func register(_ chord: KeyChord) -> Bool {
+    func register(_ chord: KeyChord) -> Status {
         unregister()
         let id = EventHotKeyID(signature: Self.signature, id: 1)
-        let status = RegisterEventHotKey(UInt32(chord.keyCode), chord.carbonModifiers, id, GetApplicationEventTarget(), 0, &hotKeyRef)
-        if status != noErr {
-            NSLog("Top NotchSH: could not register %@ as the global hotkey (OSStatus %d); another app may own it.", chord.displayString, status)
+        let status = RegisterEventHotKey(
+            UInt32(chord.keyCode), chord.carbonModifiers, id, GetApplicationEventTarget(),
+            OptionBits(kEventHotKeyExclusive), &hotKeyRef
+        )
+        switch status {
+        case noErr:
+            // Registered, but an enabled macOS shortcut on the same chord fires instead.
+            return SystemShortcuts.isReserved(chord) ? .systemShortcut : .registered
+        case OSStatus(eventHotKeyExistsErr):
+            return .takenByAnotherApp
+        default:
+            return .failed(status)
         }
-        return status == noErr
     }
 
     func unregister() {
@@ -54,5 +73,47 @@ final class GlobalHotkey {
         }
         handlerRef = nil
         onPress = nil
+    }
+}
+
+/// macOS's own keyboard shortcuts (System Settings → Keyboard → Keyboard
+/// Shortcuts). An enabled one takes precedence over any app's hotkey.
+enum SystemShortcuts {
+    static func isReserved(_ chord: KeyChord) -> Bool {
+        var shortcuts: Unmanaged<CFArray>?
+        guard CopySymbolicHotKeys(&shortcuts) == noErr,
+              let list = shortcuts?.takeRetainedValue() as? [[String: Any]] else { return false }
+        return list.contains { shortcut in
+            (shortcut[kHISymbolicHotKeyEnabled as String] as? Bool) == true
+                && (shortcut[kHISymbolicHotKeyCode as String] as? Int) == Int(chord.keyCode)
+                && (shortcut[kHISymbolicHotKeyModifiers as String] as? Int).map(UInt32.init) == chord.carbonModifiers
+        }
+    }
+}
+
+/// Whether the global toggle shortcut actually works, for display in the UI.
+@MainActor
+final class HotkeyStatus: ObservableObject {
+    @Published fileprivate(set) var chord: KeyChord?
+    @Published fileprivate(set) var status: GlobalHotkey.Status = .registered
+
+    /// A sentence explaining the problem, or `nil` when the shortcut works.
+    var problem: String? {
+        guard let chord else { return nil }
+        switch status {
+        case .registered:
+            return nil
+        case .systemShortcut:
+            return "\(chord.displayString) is a macOS shortcut, which takes precedence. Pick another, or turn it off in System Settings → Keyboard → Keyboard Shortcuts."
+        case .takenByAnotherApp:
+            return "\(chord.displayString) is already used by another app. Pick another shortcut, or free it in that app."
+        case .failed(let code):
+            return "\(chord.displayString) couldn't be registered (error \(code)). Pick another shortcut."
+        }
+    }
+
+    func record(_ status: GlobalHotkey.Status, for chord: KeyChord) {
+        self.chord = chord
+        self.status = status
     }
 }

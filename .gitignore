@@ -4,3 +4,7 @@ build/
 dist/
 DerivedData/
 xcuserdata/
+# Never commit signing secrets (e.g. an exported Sparkle private key).
+*sparkle*private*
+*.p12
+*.pem
