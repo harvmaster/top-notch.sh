@@ -142,3 +142,17 @@ extension Comparable {
         min(max(self, range.lowerBound), range.upperBound)
     }
 }
+
+/// Escapes paths the way Terminal.app does when files are dropped on it.
+enum ShellEscaping {
+    private static let special = Set(" \t\n'\"\\()[]{}<>&;|$`!*?#~=%^,")
+
+    static func escape(_ path: String) -> String {
+        path.reduce(into: "") { result, character in
+            if special.contains(character) {
+                result.append("\\")
+            }
+            result.append(character)
+        }
+    }
+}

@@ -15,7 +15,7 @@ final class NotchCoordinator: ObservableObject {
     private let workspaces: WorkspaceStore
     private let popouts: PopoutWindows
     private let showSettings: () -> Void
-    private let assignmentStore: JSONDefaults<[ScreenID: WorkspaceID]>
+    private let assignmentStore: ConfigFile<[ScreenID: WorkspaceID]>
 
     private(set) var controllers: [ScreenID: NotchController] = [:]
     private var previousApp: NSRunningApplication?
@@ -25,15 +25,15 @@ final class NotchCoordinator: ObservableObject {
         settings: SettingsStore,
         workspaces: WorkspaceStore,
         popouts: PopoutWindows,
-        defaults: UserDefaults = .standard,
+        displaysFile: ConfigFile<[ScreenID: WorkspaceID]>,
         showSettings: @escaping () -> Void
     ) {
         self.settings = settings
         self.workspaces = workspaces
         self.popouts = popouts
         self.showSettings = showSettings
-        assignmentStore = JSONDefaults(key: "screenAssignments", defaults: defaults)
-        assignments = assignmentStore.load(fallback: [:])
+        assignmentStore = displaysFile
+        assignments = displaysFile.loadOrBackUp(defaults: [:])
     }
 
     func start() {
@@ -47,6 +47,11 @@ final class NotchCoordinator: ObservableObject {
         settings.publisher(\.general.showOnAllDisplays)
             .dropFirst()
             .sink { [weak self] _ in self?.syncScreens() }
+            .store(in: &subscriptions)
+
+        settings.publisher(\.general.hideFromScreenSharing)
+            .dropFirst()
+            .sink { [weak self] hidden in self?.controllers.values.forEach { $0.setHiddenFromScreenSharing(hidden) } }
             .store(in: &subscriptions)
 
         Publishers.Merge(
@@ -76,8 +81,11 @@ final class NotchCoordinator: ObservableObject {
         case .toggleNotch:
             if let focusedNotch {
                 focusedNotch.close()
+            } else if let notch = notchUnderPointer, notch.isOpen {
+                // Open but unfocused (pinned, or focus-loss closing is off): bring it forward.
+                notch.focus()
             } else {
-                notchUnderPointer?.toggle()
+                notchUnderPointer?.open()
             }
         case .closeNotch:
             notch?.close()
@@ -85,6 +93,12 @@ final class NotchCoordinator: ObservableObject {
             notch?.workspace.newTab()
         case .closeTab:
             notch?.workspace.closeActiveTab()
+        case .reopenClosedTab:
+            notch?.workspace.reopenClosedTab()
+        case .togglePin:
+            notch?.togglePin()
+        case .find(let direction):
+            focusedSession?.find(direction)
         case .nextTab:
             notch?.workspace.selectTab(offset: 1)
         case .previousTab:
@@ -239,12 +253,15 @@ extension NotchCoordinator: NotchControllerDelegate {
 
     func notchDidClose(_ controller: NotchController) {
         guard !controllers.values.contains(where: \.isOpen) else { return }
+        ActivationPolicy.refresh()
         defer { previousApp = nil }
 
         // Hand focus back to whatever was frontmost, unless the user has moved
-        // on to another app or to one of our own windows (settings, pop-outs).
-        let keyWindowIsOurs = NSApp.keyWindow.map { !($0 is NotchPanel) } ?? false
-        guard NSApp.isActive, !keyWindowIsOurs, let previousApp, !previousApp.isTerminated else { return }
+        // on to another app or has one of our own windows (settings, pop-outs)
+        // open. Checking visibility rather than key status avoids a race with
+        // a window that is still becoming key.
+        let hasOwnWindows = NSApp.windows.contains { $0.isVisible && !($0 is NSPanel) && $0.styleMask.contains(.titled) }
+        guard NSApp.isActive, !hasOwnWindows, let previousApp, !previousApp.isTerminated else { return }
         previousApp.activate()
     }
 

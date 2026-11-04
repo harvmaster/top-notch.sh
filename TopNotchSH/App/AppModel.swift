@@ -10,11 +10,17 @@ final class AppModel {
     let input: InputRouter
     private let settingsWindow: SettingsWindow
 
-    init(defaults: UserDefaults = .standard) {
-        let settings = SettingsStore(defaults: defaults)
-        let workspaces = WorkspaceStore(defaults: defaults) { directory in
+    init(config: ConfigDirectory = .standard) {
+        if config.url == ConfigDirectory.standard.url {
+            config.migrateFromUserDefaults()
+        }
+        let settings = SettingsStore(file: config.settings, watchesForEdits: true)
+        let workspaces = WorkspaceStore(
+            file: config.workspaces,
+            restoresTabs: { settings.settings.general.restoreTabs }
+        ) { directory, command in
             let session = TerminalSession(settings: settings, directory: directory)
-            session.start()
+            session.start(running: command)
             return session
         }
         let settingsWindow = SettingsWindow()
@@ -22,7 +28,7 @@ final class AppModel {
             settings: settings,
             workspaces: workspaces,
             popouts: PopoutWindows(settings: settings),
-            defaults: defaults,
+            displaysFile: config.displays,
             showSettings: { settingsWindow.show() }
         )
         let input = InputRouter(settings: settings, workspaces: workspaces) { [weak coordinator] command in
@@ -51,6 +57,7 @@ final class AppModel {
     }
 
     func stop() {
+        workspaces.persist()
         input.stop()
         coordinator.stop()
     }

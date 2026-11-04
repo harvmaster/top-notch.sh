@@ -1,7 +1,8 @@
 import Combine
 import SwiftUI
 
-/// Single source of truth for `AppSettings`. Every mutation is persisted.
+/// Single source of truth for `AppSettings`, persisted to `settings.json`.
+/// Every mutation is saved, and hand edits to the file apply immediately.
 @MainActor
 final class SettingsStore: ObservableObject {
     @Published private(set) var settings: AppSettings {
@@ -11,13 +12,19 @@ final class SettingsStore: ObservableObject {
     /// Unlike `$settings`, which fires *before* the property changes, this
     /// fires after, so subscribers can read `settings` and see the new value.
     private let changes: CurrentValueSubject<AppSettings, Never>
-    private let persistence: JSONDefaults<AppSettings>
+    private let file: ConfigFile<AppSettings>
+    private var watcher: DirectoryWatcher?
 
-    init(defaults: UserDefaults = .standard) {
-        persistence = JSONDefaults(key: "settings", defaults: defaults)
-        let settings = persistence.load(fallback: AppSettings())
+    init(file: ConfigFile<AppSettings>, watchesForEdits: Bool = false) {
+        self.file = file
+        let settings = file.loadOrBackUp(defaults: AppSettings())
         self.settings = settings
         changes = CurrentValueSubject(settings)
+        if watchesForEdits {
+            watcher = DirectoryWatcher(url: file.url.deletingLastPathComponent()) { [weak self] in
+                self?.reloadFromDisk()
+            }
+        }
     }
 
     func update(_ mutate: (inout AppSettings) -> Void) {
@@ -25,7 +32,14 @@ final class SettingsStore: ObservableObject {
         mutate(&updated)
         guard updated != settings else { return }
         settings = updated
-        persistence.save(updated)
+        file.save(updated)
+    }
+
+    /// Picks up hand edits. A half-written or invalid file is ignored, so a
+    /// typo never resets everything to defaults.
+    func reloadFromDisk() {
+        guard let loaded = try? file.load(defaults: AppSettings()), loaded != settings else { return }
+        settings = loaded
     }
 
     func binding<Value>(_ keyPath: WritableKeyPath<AppSettings, Value>) -> Binding<Value> {

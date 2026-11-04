@@ -7,6 +7,7 @@ enum Command: Equatable {
     case showSettings
     case newTab
     case closeTab
+    case reopenClosedTab
     case nextTab
     case previousTab
     case selectTab(index: Int)
@@ -17,6 +18,8 @@ enum Command: Equatable {
     case createWorkspace
     case deleteWorkspace(WorkspaceID)
     case applySizePreset(SizePreset)
+    case togglePin
+    case find(FindDirection)
     case resetTerminal
     case adjustFontSize(delta: Double)
     case resetFontSize
@@ -26,15 +29,26 @@ enum Command: Equatable {
         case .toggleNotch: self = .toggleNotch
         case .newTab: self = .newTab
         case .closeTab: self = .closeTab
+        case .reopenClosedTab: self = .reopenClosedTab
         case .nextTab: self = .nextTab
         case .previousTab: self = .previousTab
         case .detachTab: self = .detachTab
         case .nextWorkspace: self = .nextWorkspace
         case .previousWorkspace: self = .previousWorkspace
+        case .togglePin: self = .togglePin
+        case .find: self = .find(.show)
+        case .findNext: self = .find(.next)
+        case .findPrevious: self = .find(.previous)
         case .resetTerminal: self = .resetTerminal
         case .increaseFontSize: self = .adjustFontSize(delta: 1)
         case .decreaseFontSize: self = .adjustFontSize(delta: -1)
         case .resetFontSize: self = .resetFontSize
         }
     }
+}
+
+enum FindDirection: Equatable {
+    case show
+    case next
+    case previous
 }

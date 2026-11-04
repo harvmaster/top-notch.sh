@@ -10,6 +10,7 @@ struct AppSettings: Codable, Equatable {
     var sizing = SizingSettings()
     var padding = PaddingSettings()
     var appearance = AppearanceSettings()
+    var activity = ActivitySettings()
     var motion = MotionSettings()
     var terminal = TerminalSettings()
     var hotkeys = HotkeyAction.defaultBindings
@@ -24,6 +25,19 @@ struct GeneralSettings: Codable, Equatable {
     var showOnAllDisplays = true
     var showMenuBarIcon = true
     var closeOnFocusLoss = true
+    /// Reopen each workspace's tabs, in their last folders, after a restart.
+    var restoreTabs = true
+    /// Keep notch and pop-out windows out of screen sharing and recordings.
+    var hideFromScreenSharing = false
+}
+
+/// What makes the closed notch light up for a tab you are not looking at.
+struct ActivitySettings: Codable, Equatable {
+    var bell = true
+    var finishedCommands = true
+    /// Commands shorter than this don't count as "finished" activity.
+    var minimumCommandSeconds = 10.0
+    var output = false
 }
 
 // MARK: - Sizing
@@ -85,6 +99,10 @@ struct AppearanceSettings: Codable, Equatable {
     var openCornerRadius = 22.0
     var opacity = 1.0
     var blurRadius = 0.0
+    /// Opacity of the open panel's background; text stays fully opaque.
+    var backgroundOpacity = 1.0
+    /// Blur whatever is behind a translucent background.
+    var backgroundBlur = true
     var showsTitleWhenClosed = true
 }
 

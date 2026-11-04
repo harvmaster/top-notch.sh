@@ -76,6 +76,30 @@ private struct GeneralPage: View {
             Section("Behavior") {
                 Toggle("Show on all displays", isOn: store.binding(\.general.showOnAllDisplays))
                 Toggle("Close when another app is focused", isOn: store.binding(\.general.closeOnFocusLoss))
+                Caption("Pin the notch (⌘⇧P or the pin button) to keep it open regardless.")
+                Toggle("Reopen tabs after restart", isOn: store.binding(\.general.restoreTabs))
+                Caption("Tabs come back in their last folders, with their names. Running programs can't be restored.")
+            }
+            Section("Privacy") {
+                Toggle("Hide from screen sharing and recordings", isOn: store.binding(\.general.hideFromScreenSharing))
+                Caption("Also available from the menu bar icon, for quick switching before a call.")
+            }
+            Section {
+                Toggle("A tab rings the bell", isOn: store.binding(\.activity.bell))
+                Toggle("A long command finishes", isOn: store.binding(\.activity.finishedCommands))
+                if store.settings.activity.finishedCommands {
+                    SliderRow(
+                        title: "Longer than",
+                        value: store.binding(\.activity.minimumCommandSeconds),
+                        range: 1...120,
+                        format: { "\(Int($0.rounded())) s" }
+                    )
+                }
+                Toggle("Any new output", isOn: store.binding(\.activity.output))
+            } header: {
+                Text("Activity")
+            } footer: {
+                Caption("When this happens in a tab you aren't looking at, the closed notch widens to show an indicator and the tab gets a dot.")
             }
         }
     }
@@ -206,6 +230,15 @@ private struct AppearancePage: View {
                 Toggle("Show tab title in closed notch", isOn: store.binding(\.appearance.showsTitleWhenClosed))
                 Caption("The title only appears on displays without a camera notch.")
             }
+            Section {
+                SliderRow(title: "Opacity", value: store.binding(\.appearance.backgroundOpacity), range: 0.3...1, step: 0.05, format: SliderRow.percent)
+                Toggle("Blur what's behind", isOn: store.binding(\.appearance.backgroundBlur))
+                    .disabled(store.settings.appearance.backgroundOpacity >= 1)
+            } header: {
+                Text("Background")
+            } footer: {
+                Caption("Makes only the background translucent; text stays crisp. The closed notch stays solid black.")
+            }
             Section("Shadow") {
                 Toggle("Shadow", isOn: store.binding(\.appearance.shadowEnabled))
                 if store.settings.appearance.shadowEnabled {
@@ -291,7 +324,7 @@ private struct TerminalPage: View {
             } header: {
                 Text("Input & shell")
             } footer: {
-                Caption("Option as Meta makes ⌥← / ⌥→ jump by word. Shell changes apply to new tabs.")
+                Caption("Option as Meta makes ⌥← / ⌥→ jump by word. Shell changes apply to new tabs. Scrollback costs about 2 KB per line at the default width, and only as output fills it: 5,000 lines is about 10 MB for a tab that has used it all.")
             }
         }
     }
@@ -385,16 +418,14 @@ private struct WorkspacesPage: View {
 
     var body: some View {
         Form {
+            ForEach(Array(workspaces.workspaces.enumerated()), id: \.element.id) { index, workspace in
+                WorkspaceSection(workspace: workspace, index: index, count: workspaces.workspaces.count)
+            }
+
             Section {
-                ForEach(workspaces.workspaces) { workspace in
-                    WorkspaceRow(workspace: workspace)
-                }
-                .onMove { workspaces.move(fromOffsets: $0, toOffset: $1) }
                 Button("New Workspace") { workspaces.create() }
-            } header: {
-                Text("Workspaces")
             } footer: {
-                Caption("Jump shortcuts work while the notch is open. Drag to reorder.")
+                Caption("Jump shortcuts work while the notch is open. The startup command is typed into every new tab, e.g. ssh my-server.")
             }
 
             Section {
@@ -421,43 +452,98 @@ private struct WorkspacesPage: View {
     }
 }
 
-private struct WorkspaceRow: View {
+private struct WorkspaceSection: View {
     @ObservedObject var workspace: Workspace
+    let index: Int
+    let count: Int
     @EnvironmentObject private var workspaces: WorkspaceStore
     @EnvironmentObject private var coordinator: NotchCoordinator
     @State private var isConfirmingDelete = false
     @State private var draftName = ""
+    @State private var draftCommand = ""
 
     var body: some View {
-        HStack(spacing: 10) {
+        Section {
             TextField("Name", text: $draftName)
-                .labelsHidden()
                 .onSubmit { workspaces.rename(workspace, to: draftName) }
-                .onAppear { draftName = workspace.name }
                 .onChange(of: workspace.name) { _, name in draftName = name }
-                .onDisappear { workspaces.rename(workspace, to: draftName) }
-            Text(workspace.tabs.isEmpty ? "idle" : "\(workspace.tabs.count) tab\(workspace.tabs.count == 1 ? "" : "s")")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .frame(width: 56, alignment: .trailing)
-            HotkeyRecorder(
-                chord: Binding(get: { workspace.hotkey }, set: { workspaces.setHotkey($0, for: workspace) }),
-                allowsClearing: true
-            )
-            Button {
-                isConfirmingDelete = true
-            } label: {
-                Image(systemName: "trash")
+            LabeledContent("Jump shortcut") {
+                HotkeyRecorder(
+                    chord: Binding(get: { workspace.hotkey }, set: { workspaces.setHotkey($0, for: workspace) }),
+                    allowsClearing: true
+                )
             }
-            .buttonStyle(.borderless)
-            .disabled(!workspaces.canDelete)
-            .help("Delete workspace")
-            .confirmationDialog("Delete “\(workspace.name)”?", isPresented: $isConfirmingDelete) {
-                Button("Delete and Close Its Tabs", role: .destructive) { coordinator.delete(workspace) }
-            } message: {
-                Text("Displays showing it switch to another workspace.")
+            LabeledContent("Startup folder") {
+                HStack(spacing: 6) {
+                    Text(workspace.directory.map { ($0 as NSString).abbreviatingWithTildeInPath } ?? "Home")
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                    Button("Choose…", action: chooseFolder)
+                    if workspace.directory != nil {
+                        Button {
+                            workspaces.setDirectory(nil, for: workspace)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.secondary)
+                        .help("Use the home folder")
+                    }
+                }
             }
+            TextField("Startup command", text: $draftCommand, prompt: Text("None"))
+                .onSubmit { workspaces.setStartupCommand(draftCommand, for: workspace) }
+            HStack {
+                Text(workspace.tabs.isEmpty ? "Not opened yet" : "\(workspace.tabs.count) open tab\(workspace.tabs.count == 1 ? "" : "s")")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    workspaces.move(workspace, by: -1)
+                } label: {
+                    Image(systemName: "arrow.up")
+                }
+                .disabled(index == 0)
+                .help("Move up")
+                Button {
+                    workspaces.move(workspace, by: 1)
+                } label: {
+                    Image(systemName: "arrow.down")
+                }
+                .disabled(index == count - 1)
+                .help("Move down")
+                Button("Delete…", role: .destructive) { isConfirmingDelete = true }
+                    .disabled(!workspaces.canDelete)
+            }
+        } header: {
+            Text(workspace.name)
         }
+        .onAppear {
+            draftName = workspace.name
+            draftCommand = workspace.startupCommand ?? ""
+        }
+        .onDisappear {
+            workspaces.rename(workspace, to: draftName)
+            workspaces.setStartupCommand(draftCommand, for: workspace)
+        }
+        .confirmationDialog("Delete “\(workspace.name)”?", isPresented: $isConfirmingDelete) {
+            Button("Delete and Close Its Tabs", role: .destructive) { coordinator.delete(workspace) }
+        } message: {
+            Text("Displays showing it switch to another workspace.")
+        }
+    }
+
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Use Folder"
+        if let directory = workspace.directory {
+            panel.directoryURL = URL(fileURLWithPath: (directory as NSString).expandingTildeInPath)
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        workspaces.setDirectory(url.path, for: workspace)
     }
 }
 

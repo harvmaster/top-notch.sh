@@ -21,7 +21,15 @@ struct NotchView: View {
             }
         }
         .frame(width: controller.size.width, height: controller.size.height, alignment: .top)
-        .background(.black)
+        .background {
+            // Closed, the notch must stay solid black to blend with the hardware.
+            if isOpen {
+                PanelBackground(color: settingsStore.settings.terminal.theme.palette.backgroundColor)
+                    .transition(.opacity)
+            } else {
+                Color.black
+            }
+        }
         .overlay(alignment: .bottomTrailing) {
             if isOpen {
                 ResizeHandle(controller: controller)
@@ -46,29 +54,107 @@ private struct ClosedNotchView: View {
     @ObservedObject var controller: NotchController
     @ObservedObject var workspace: Workspace
     @EnvironmentObject private var settingsStore: SettingsStore
+    @State private var isDropTargeted = false
 
     var body: some View {
-        ZStack {
-            if settingsStore.settings.appearance.showsTitleWhenClosed, !controller.geometry.hasNotch {
-                Group {
-                    if let tab = workspace.activeTab {
-                        SessionTitle(session: tab)
-                    } else {
-                        Text(workspace.name)
+        HStack(spacing: 0) {
+            if let activity = controller.activity {
+                ActivityIcon(activity: activity)
+                    // The notch's visible edge sits `topRadius` in from the panel edge.
+                    .padding(.leading, NotchShape.closed.topRadius + NotchController.indicatorInset)
+                    .frame(width: NotchController.indicatorWidth, alignment: .leading)
+                    .transition(.scale.combined(with: .opacity))
+            }
+
+            ZStack {
+                if settingsStore.settings.appearance.showsTitleWhenClosed, !controller.geometry.hasNotch {
+                    Group {
+                        if let tab = workspace.activeTab {
+                            SessionTitle(session: tab)
+                        } else {
+                            Text(workspace.name)
+                        }
                     }
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .padding(.horizontal, 16)
                 }
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.white.opacity(0.7))
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .padding(.horizontal, 16)
+            }
+            .frame(maxWidth: .infinity)
+
+            if let activity = controller.activity {
+                PulsingDot(color: activity.color)
+                    .frame(width: 14)
+                    .padding(.trailing, NotchShape.closed.topRadius + NotchController.indicatorInset)
+                    .frame(width: NotchController.indicatorWidth, alignment: .trailing)
+                    .transition(.scale.combined(with: .opacity))
             }
         }
         .frame(width: controller.size.width, height: controller.size.height)
         .contentShape(Rectangle())
         .onTapGesture { controller.open() }
+        // Dragging files onto the closed notch opens it, so they can be dropped on the terminal.
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { _ in false }
+        .onChange(of: isDropTargeted) { _, targeted in
+            if targeted { controller.open() }
+        }
         .accessibilityAddTraits(.isButton)
-        .accessibilityLabel("Open terminal")
+        .accessibilityLabel(controller.activity.map { "Open terminal, \($0.accessibilityLabel)" } ?? "Open terminal")
+    }
+}
+
+extension SessionActivity {
+    var color: Color {
+        switch self {
+        case .output: .blue
+        case .finished: .green
+        case .bell: .orange
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .output: "text.bubble.fill"
+        case .finished: "checkmark.circle.fill"
+        case .bell: "bell.fill"
+        }
+    }
+
+    var accessibilityLabel: String {
+        switch self {
+        case .output: "new output"
+        case .finished: "a command finished"
+        case .bell: "a tab rang the bell"
+        }
+    }
+}
+
+private struct ActivityIcon: View {
+    let activity: SessionActivity
+
+    var body: some View {
+        Image(systemName: activity.symbol)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(activity.color)
+            .shadow(color: activity.color.opacity(0.8), radius: 4)
+    }
+}
+
+private struct PulsingDot: View {
+    let color: Color
+    @State private var isPulsing = false
+
+    var body: some View {
+        Circle()
+            .fill(color)
+            .frame(width: 6, height: 6)
+            .shadow(color: color, radius: isPulsing ? 5 : 1)
+            .scaleEffect(isPulsing ? 1.25 : 0.85)
+            .opacity(isPulsing ? 1 : 0.6)
+            .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: isPulsing)
+            .onAppear { isPulsing = true }
     }
 }
 
@@ -76,7 +162,7 @@ struct SessionTitle: View {
     @ObservedObject var session: TerminalSession
 
     var body: some View {
-        Text(session.title)
+        Text(session.displayTitle)
     }
 }
 

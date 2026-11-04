@@ -4,7 +4,7 @@ A terminal that lives under the notch on macOS. A rebuild of CommandNotch: Swift
 
 ## Build
 
-Requires macOS 14+, Xcode 16+, and `brew install xcodegen`.
+Requires an Apple silicon Mac with macOS 14+, Xcode 16+, and `brew install xcodegen`.
 
 ```bash
 xcodegen generate
@@ -17,8 +17,39 @@ From the command line:
 xcodegen generate
 xcodebuild -project TopNotchSH.xcodeproj -scheme TopNotchSH -skipPackagePluginValidation build
 xcodebuild -project TopNotchSH.xcodeproj -scheme TopNotchSH -skipPackagePluginValidation test
-./scripts/build-dmg.sh           # → dist/TopNotchSH.dmg
 ```
+
+### Release DMG
+
+```bash
+./scripts/release.sh                 # build, sign, notarize and staple → dist/TopNotchSH-<version>.dmg
+./scripts/release.sh --no-notarize   # quick signed build without notarizing
+./scripts/release.sh --help
+```
+
+The script builds an Apple silicon app and signs it with the hardened runtime. It then packages the app into a styled drag-to-Applications DMG and signs the DMG. It picks the best identity in your keychain: Developer ID Application, then Apple Development, then ad-hoc. `SIGN_IDENTITY=…` overrides the choice.
+
+With a Developer ID certificate, the script also notarizes by default, using the keychain profile `top-notchsh`. That makes the DMG open on any Mac without Gatekeeper warnings. One-time setup:
+
+1. Xcode → Settings → Accounts → your team → Manage Certificates → **+** → Developer ID Application.
+2. Create an app-specific password at account.apple.com, then run the command below. It prompts for the password and stores it in the Keychain.
+   `xcrun notarytool store-credentials top-notchsh --apple-id <you> --team-id <TEAMID>`
+
+Notarization is only needed for builds other people download, from GitHub releases or Homebrew. Builds made on your own Mac run without it.
+
+The first run may ask to let your terminal control Finder; this lays out the DMG window.
+
+## Configuration
+
+Configuration lives in `~/.config/top-notchsh/` as pretty-printed JSON:
+
+| File | Contents |
+| --- | --- |
+| `settings.json` | Every setting, including hotkeys and size presets. Hand edits apply immediately. |
+| `workspaces.json` | Workspaces: name, jump shortcut, startup folder and command, saved tabs. |
+| `displays.json` | Which workspace each display shows. |
+
+Keys you leave out use their defaults, so a minimal file works. If a file is invalid, it's moved aside to `*.json.invalid` rather than overwritten, and defaults are used. A typo saved while the app is running is ignored until it's fixed. Settings from earlier builds, which used `UserDefaults`, are migrated on first launch.
 
 ### End-to-end self-test
 
@@ -36,11 +67,14 @@ SwiftTerm is pinned to `1.20.x`. The `1.99.x` series doesn't compile with Xcode 
 | --- | --- | --- |
 | ⌘⏎ | Toggle notch | everywhere |
 | ⌘T / ⌘W | New / close tab | open notch |
+| ⌘⇧T | Reopen the last closed tab, in its folder | open notch |
 | ⌘⇧] / ⌘⇧[ | Next / previous tab | open notch |
 | ⌘1 … ⌘9 | Go to tab | open notch |
 | ⌘⇧↓ / ⌘⇧↑ | Next / previous workspace | open notch |
 | ⌘D | Move tab to its own window | open notch |
 | ⌘⇧1 / 2 / 3 | Size presets | open notch |
+| ⌘⇧P | Pin the notch open | open notch |
+| ⌘F, ⌘G / ⌘⇧G | Find, next / previous match | any terminal |
 | **⌘R** | **Reset terminal input modes** | any terminal |
 | ⌘= / ⌘- / ⌘0 | Font size bigger / smaller / reset | any terminal |
 | ⌘← / ⌘→, ⌘⌫, ⌘L | Start/end of line, delete line, clear | any terminal |
@@ -49,6 +83,16 @@ SwiftTerm is pinned to `1.20.x`. The `1.99.x` series doesn't compile with Xcode 
 Everything except ⌘1–9 and the editing keys can be changed in Settings → Hotkeys. Each workspace can also have its own jump shortcut.
 
 ⌘R puts the terminal back into a normal input state after a program crashes and leaves it broken (for example, mouse movement printing junk). It turns off mouse reporting, bracketed paste and application cursor keys, leaves the alternate screen, and does a soft reset. The shell itself isn't restarted.
+
+## Features
+
+- **Tabs.** Drag to reorder: the other tabs slide aside to preview the new order. Double-click or right-click a tab to rename it. Tabs come back after a restart, in their last folders and with their names (turn this off in Settings → General).
+- **Workspaces.** Each workspace can have its own jump shortcut, startup folder, and a startup command that is typed into every new tab (e.g. `ssh my-server`).
+- **Activity.** When a tab you aren't looking at rings the bell or finishes a long command, the closed notch widens and shows a glowing indicator, and the tab gets a dot. You can choose the triggers in Settings → General.
+- **Pinning.** A pinned notch stays open while you work in other apps. ⌘⏎ brings it forward instead of closing it.
+- **Files.** Drop files onto the terminal to type their escaped paths. Dragging files over the closed notch opens it.
+- **Privacy.** Hide the notch and pop-out windows from screen sharing and recordings. Toggle it from the menu bar icon. It's off by default.
+- **Translucency.** The background opacity and blur can be adjusted; text stays crisp, and the closed notch stays solid black.
 
 ## Architecture
 

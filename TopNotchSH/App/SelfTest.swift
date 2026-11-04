@@ -20,11 +20,11 @@ final class SelfTest {
         return URL(fileURLWithPath: arguments[index + 1], isDirectory: true)
     }
 
-    /// A throwaway defaults domain so test runs never touch real settings.
-    static let defaults: UserDefaults = {
-        let defaults = UserDefaults(suiteName: "com.topnotchsh.selftest")!
-        defaults.removePersistentDomain(forName: "com.topnotchsh.selftest")
-        return defaults
+    /// A throwaway config directory so test runs never touch real settings.
+    static let config: ConfigDirectory = {
+        let url = FileManager.default.temporaryDirectory.appending(path: "top-notchsh-selftest", directoryHint: .isDirectory)
+        try? FileManager.default.removeItem(at: url)
+        return ConfigDirectory(url: url)
     }()
 
     private let model: AppModel
@@ -40,7 +40,11 @@ final class SelfTest {
     func start() {
         try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         Task { @MainActor in
-            await run()
+            if ProcessInfo.processInfo.arguments.contains("--memory") {
+                await measureMemory()
+            } else {
+                await run()
+            }
             log("\nRESULT: \(failures == 0 ? "PASS" : "FAIL (\(failures) failed)")")
             try? lines.joined(separator: "\n").write(to: output.appendingPathComponent("report.txt"), atomically: true, encoding: .utf8)
             NSApp.terminate(nil)
@@ -307,6 +311,8 @@ final class SelfTest {
         check("deleting a workspace falls back to another", await until { notch.workspace === main && self.model.workspaces.workspaces.count == 1 })
         check("deleted workspace's shells are gone", second.tabs.isEmpty)
 
+        await newFeatureChecks(notch: notch, tab1: tab1)
+
         // Detach to window
         await key(kVK_ANSI_T, .command)
         _ = await until { workspace.tabs.count == 2 }
@@ -332,7 +338,8 @@ final class SelfTest {
 
         // Settings window closes the notch (focus loss)
         model.perform(.showSettings)
-        check("settings window opens", await until { NSApp.keyWindow?.title == "Top NotchSH Settings" })
+        check("settings window opens", await until { NSApp.keyWindow?.identifier == SettingsWindow.identifier },
+              "active=\(NSApp.isActive) key=\(NSApp.keyWindow?.title ?? "nil") visible=\(NSApp.windows.filter(\.isVisible).map { "\(Swift.type(of: $0)):\($0.title)" })")
         check("notch closes when focus moves elsewhere", await until { !notch.isOpen })
         await sleep(0.6)
         let listener = ChordListener()
@@ -375,6 +382,270 @@ final class SelfTest {
         model.perform(.toggleNotch)
         _ = await until { !notch.isOpen }
         await sleep(0.8)
+    }
+
+    // MARK: - Memory report
+
+    /// The app's memory as Activity Monitor reports it (physical footprint), in MB.
+    private static func footprint() -> Double {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        _ = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return Double(info.phys_footprint) / 1_048_576
+    }
+
+    /// Resident memory of the shells (child processes), in MB.
+    private static func shellMemory() -> (count: Int, megabytes: Double) {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-axo", "ppid=,rss="]
+        process.standardOutput = pipe
+        try? process.run()
+        process.waitUntilExit()
+        let rows = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .split(separator: "\n")
+            .map { $0.split(separator: " ").compactMap { Int($0) } }
+            .filter { $0.count == 2 && $0[0] == Int(getpid()) }
+        return (rows.count, Double(rows.map { $0[1] }.reduce(0, +)) / 1024)
+    }
+
+    private func report(_ label: String, previous: inout Double) {
+        let now = Self.footprint()
+        let shells = Self.shellMemory()
+        var stats = malloc_statistics_t()
+        malloc_zone_statistics(nil, &stats)
+        let inUse = Double(stats.size_in_use) / 1_048_576
+        log(String(format: "%-46@ app %6.1f MB  (%+6.1f)  heap in use %6.1f MB   shells: %2d using %5.1f MB",
+                   label as NSString, now, now - previous, inUse, shells.count - 1, shells.megabytes))
+        previous = now
+    }
+
+    private func settle() async {
+        await sleep(1.5)
+    }
+
+    private func measureMemory() async {
+        let settings = model.settings
+        var last = Self.footprint()
+        log("CharData: \(MemoryLayout<CharData>.stride) bytes per cell")
+        await settle()
+        report("launched, notch closed, no shells", previous: &last)
+
+        guard let notch = model.coordinator.controllers.values.first else { return }
+        model.perform(.toggleNotch)
+        _ = await until { notch.isOpen }
+        let workspace = notch.workspace
+        let tab = workspace.activeTab!
+        _ = await until(5) { !self.text(tab).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        await settle()
+        let terminal = tab.view.getTerminal()
+        log("grid: \(terminal.cols) columns x \(terminal.rows) rows, scrollback limit \(settings.settings.terminal.scrollbackLines)")
+        report("1 tab open", previous: &last)
+
+        for _ in 0..<9 {
+            workspace.newTab()
+        }
+        _ = await until(10) { workspace.tabs.allSatisfy { !self.text($0).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } }
+        await settle()
+        report("10 tabs open (empty scrollback)", previous: &last)
+
+        workspace.selectTab(tab.id)
+        _ = await until { notch.panel.firstResponder === tab.view }
+        let filler = "seq -f 'line %06g ................................' 1"
+        await type("\(filler) 10000\r")
+        _ = await until(20) { self.hasLine(tab, "line 010000 ................................") }
+        await settle()
+        report("1 tab: 10,000 lines through 5,000 scrollback", previous: &last)
+
+        settings.update { $0.terminal.scrollbackLines = 50_000 }
+        await type("\(filler) 60000\r")
+        _ = await until(60) { self.hasLine(tab, "line 060000 ................................") }
+        await settle()
+        report("same tab: scrollback raised to 50,000, filled", previous: &last)
+
+        settings.update { $0.terminal.scrollbackLines = 1_000 }
+        await settle()
+        report("scrollback lowered to 1,000", previous: &last)
+        await type("\(filler) 10000\r")
+        _ = await until(20) { self.hasLine(tab, "line 010000 ................................") }
+        await settle()
+        report("printed 10,000 more lines (1,000 kept)", previous: &last)
+
+        // Weak references reveal whether closed tabs are really freed.
+        var probes = workspace.tabs.filter { $0 !== tab }.map { WeakSession(session: $0) }
+        let closedCount = probes.count
+        for probe in probes {
+            if let id = probe.session?.id { workspace.closeTab(id) }
+        }
+        await settle()
+        report("closed the 9 other tabs", previous: &last)
+        probes.removeAll { $0.session == nil }
+        log("closed tabs still in memory: \(probes.count) of \(closedCount)")
+        settings.update { $0.terminal.scrollbackLines = TerminalSettings().scrollbackLines }
+    }
+
+    private struct WeakSession {
+        weak var session: TerminalSession?
+    }
+
+    // MARK: - Feature checks
+
+    private func newFeatureChecks(notch: NotchController, tab1: TerminalSession) async {
+        let settings = model.settings
+        let workspace = notch.workspace
+        _ = await until { notch.panel.firstResponder === tab1.view }
+
+        // ⌘F find bar, searching a marker that has scrolled into history
+        await type("echo findme-$((6*7))\r")
+        _ = await until { self.hasLine(tab1, "findme-42") }
+        await type("seq 1 60\r")
+        _ = await until { self.hasLine(tab1, "60") }
+        await key(kVK_ANSI_F, .command)
+        let findField: () -> NSSearchField? = {
+            Self.descendants(of: tab1.view).compactMap { $0 as? NSSearchField }.first { !$0.isHiddenOrHasHiddenAncestor }
+        }
+        check("⌘F shows the find bar", await until { findField() != nil })
+        await screenshot("11-find")
+        check("find field takes keyboard focus", await until { (hostWindow(of: tab1)?.firstResponder as? NSText)?.delegate === findField() })
+        await key(kVK_ANSI_A, .command)
+        check("⌘A works inside the find field", await until {
+            ((self.hostWindow(of: tab1)?.firstResponder as? NSTextView)?.selectedRange().length ?? 0) == (findField()?.stringValue.count ?? -1)
+        })
+        await type("findme-42")
+        await sleep(0.4)
+        check("typing in the find bar finds text in the scrollback", await until { tab1.view.getSelection() == "findme-42" },
+              "selection=\(tab1.view.getSelection() ?? "nil")")
+        await key(kVK_Escape, [])
+        _ = await until { findField() == nil }
+        tab1.view.selectNone()
+        tab1.focus()
+
+        // Double-click to rename the tab
+        let window = notch.panel
+        let margin = (window.frame.width - notch.size.width) / 2
+        let tabPoint = CGPoint(x: margin + 60, y: window.frame.height - notch.size.height + OpenNotchView.tabStripHeight / 2)
+        postClick(at: tabPoint, in: window, count: 1)
+        postClick(at: tabPoint, in: window, count: 2)
+        check("double-clicking a tab starts renaming", await until { window.firstResponder is NSTextView })
+        await type("build\r")
+        check("renamed tab shows its new name", await until { tab1.displayTitle == "build" }, tab1.displayTitle)
+        check("renaming returns focus to the terminal", await until { window.firstResponder === tab1.view })
+        await screenshot("12-renamed")
+
+        // Paths are escaped when inserted
+        await type("echo ")
+        tab1.insert(paths: ["/tmp/a b(1)"])
+        await type("\r")
+        check("dropped paths are shell-escaped", await until { self.hasLine(tab1, "/tmp/a b(1)") }, tail(tab1))
+
+        // A long command finishing while the notch is closed
+        settings.update { $0.activity.minimumCommandSeconds = 1 }
+        await type("sleep 2\r")
+        await sleep(0.6)
+        model.perform(.toggleNotch)
+        _ = await until { !notch.isOpen }
+        let baseWidth = notch.geometry.closedSize(for: settings.settings.sizing).width
+        check("finished command lights up the closed notch", await until(5) { workspace.activity == .finished && notch.activity == .finished })
+        check("closed notch widens for the indicator", await until(2) { notch.size.width == baseWidth + NotchController.indicatorWidth * 2 }, "\(notch.size.width)")
+        await sleep(0.6)
+        check("panel fits the wider closed notch", notch.panel.frame.width == baseWidth + NotchController.indicatorWidth * 2, "\(notch.panel.frame.width)")
+        await screenshot("13-activity-finished")
+        model.perform(.toggleNotch)
+        check("opening the notch clears the activity", await until { notch.isOpen && workspace.activity == nil })
+
+        // A background tab ringing the bell
+        await type("sleep 1; printf '\\a'\r")
+        await key(kVK_ANSI_T, .command)
+        _ = await until { workspace.tabs.count == 2 }
+        let other = workspace.activeTab!
+        check("bell in a background tab marks it", await until(4) { tab1.activity == .bell }, "\(String(describing: tab1.activity))")
+        await screenshot("14-tab-bell")
+        await key(kVK_ANSI_1, .command)
+        check("selecting the tab clears its mark", await until { tab1.activity == nil && workspace.activity == nil })
+
+        // ⌘⇧T reopens a closed tab in its folder
+        await key(kVK_ANSI_2, .command)
+        _ = await until { workspace.activeTab === other }
+        _ = await until(5) { !self.text(other).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        await type("cd /tmp\r")
+        await sleep(0.4)
+        await key(kVK_ANSI_W, .command)
+        _ = await until { workspace.tabs.count == 1 }
+        await key(kVK_ANSI_T, [.command, .shift])
+        check("⌘⇧T reopens the closed tab", await until { workspace.tabs.count == 2 && workspace.activeTab !== tab1 })
+        if let reopened = workspace.activeTab, reopened !== tab1 {
+            _ = await until(5) { !self.text(reopened).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            await type("pwd\r")
+            check("reopened tab is back in its folder", await until { self.hasLine(reopened, "/private/tmp") || self.hasLine(reopened, "/tmp") }, tail(reopened))
+            workspace.closeTab(reopened.id)
+        }
+        _ = await until { workspace.activeTab === tab1 }
+
+        // Pinning keeps the notch open when focus moves away
+        await key(kVK_ANSI_P, [.command, .shift])
+        check("⌘⇧P pins the notch", await until { notch.isPinned })
+        await screenshot("15-pinned")
+        model.perform(.showSettings)
+        _ = await until { NSApp.keyWindow?.identifier == SettingsWindow.identifier }
+        await sleep(0.5)
+        check("pinned notch stays open when focus moves", notch.isOpen)
+        model.perform(.toggleNotch)
+        check("⌘⏎ focuses a pinned notch instead of closing it", await until { notch.isKey && notch.isOpen })
+        NSApp.windows.first { $0.identifier == SettingsWindow.identifier }?.performClose(nil)
+        notch.focus()
+        await key(kVK_ANSI_P, [.command, .shift])
+        check("⌘⇧P unpins", await until { !notch.isPinned })
+
+        // Hide from screen sharing
+        settings.update { $0.general.hideFromScreenSharing = true }
+        check("hiding from screen sharing applies to the notch", await until { notch.panel.sharingType == NSWindow.SharingType.none })
+        await screenshot("16-hidden-from-capture")
+        settings.update { $0.general.hideFromScreenSharing = false }
+        check("sharing can be turned back on", await until { notch.panel.sharingType == .readOnly })
+
+        // Translucent background
+        settings.update { $0.appearance.backgroundOpacity = 0.6 }
+        await sleep(0.4)
+        check("terminal background goes clear when translucent", tab1.view.nativeBackgroundColor.alphaComponent == 0)
+        await screenshot("17-translucent")
+        settings.update { $0.appearance.backgroundOpacity = 1 }
+        await sleep(0.2)
+        check("terminal background is opaque again", tab1.view.nativeBackgroundColor.alphaComponent == 1)
+
+        // A workspace with its own folder and startup command
+        let servers = model.workspaces.create(named: "Servers")
+        model.workspaces.setDirectory("/usr", for: servers)
+        model.workspaces.setStartupCommand("echo started-ok; pwd", for: servers)
+        notch.perform(.selectWorkspace(servers.id))
+        check("workspace startup command runs in its folder", await until(5) {
+            servers.activeTab.map { self.hasLine($0, "started-ok") && self.hasLine($0, "/usr") } ?? false
+        }, servers.activeTab.map(tail) ?? "no tab")
+        notch.perform(.deleteWorkspace(servers.id))
+        _ = await until { notch.workspace === workspace }
+
+        // Tabs are saved with their folders and names
+        model.workspaces.persist()
+        let reloaded = WorkspaceStore(file: Self.config.workspaces) { [settings] directory, _ in
+            TerminalSession(settings: settings, directory: directory)
+        }
+        let records = reloaded.workspace(workspace.id)?.tabRecords ?? []
+        check("open tabs are saved for next launch", records.count == workspace.tabs.count && records.first?.name == "build", "\(records)")
+        check("saved tabs remember their folders", records.allSatisfy { $0.directory != nil })
+        workspace.renameTab(tab1.id, to: nil)
+        settings.update { $0.activity.minimumCommandSeconds = ActivitySettings().minimumCommandSeconds }
+    }
+
+    private func hostWindow(of session: TerminalSession) -> NSWindow? {
+        session.view.window
+    }
+
+    private static func descendants(of view: NSView) -> [NSView] {
+        view.subviews + view.subviews.flatMap(descendants)
     }
 
     // MARK: - Checks
@@ -496,7 +767,7 @@ final class SelfTest {
             kVK_Delete: "\u{7f}", kVK_Return: "\r", kVK_ANSI_A: "a", kVK_ANSI_C: "c", kVK_ANSI_D: "d",
             kVK_ANSI_L: "l", kVK_ANSI_R: "r", kVK_ANSI_T: "t", kVK_ANSI_V: "v", kVK_ANSI_W: "w",
             kVK_ANSI_0: "0", kVK_ANSI_1: "1", kVK_ANSI_2: "2", kVK_ANSI_3: "3",
-            kVK_ANSI_K: "k", kVK_Escape: "\u{1b}", kVK_ANSI_Equal: "=", kVK_ANSI_Minus: "-", kVK_ANSI_LeftBracket: "[", kVK_ANSI_RightBracket: "]",
+            kVK_ANSI_K: "k", kVK_ANSI_F: "f", kVK_ANSI_P: "p", kVK_Escape: "\u{1b}", kVK_ANSI_Equal: "=", kVK_ANSI_Minus: "-", kVK_ANSI_LeftBracket: "[", kVK_ANSI_RightBracket: "]",
         ]
         return plain[keyCode] ?? ""
     }
@@ -541,6 +812,17 @@ final class SelfTest {
     private func release(in window: NSWindow, at location: CGPoint) async {
         postMouse(.leftMouseUp, at: location, in: window)
         await sleep(0.5)
+    }
+
+    /// A click at a window location, with `count` for double-clicks.
+    private func postClick(at location: CGPoint, in window: NSWindow, count: Int) {
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            guard let event = NSEvent.mouseEvent(
+                with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: count, pressure: 1
+            ) else { continue }
+            NSApp.postEvent(event, atStart: false)
+        }
     }
 
     private func postClick(at screenPoint: CGPoint, in window: NSWindow) -> Bool {

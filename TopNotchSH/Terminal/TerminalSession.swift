@@ -4,9 +4,35 @@ import Darwin
 import SwiftTerm
 
 /// A SwiftTerm view that knows its owning session, so input routing can map
-/// the first responder back to a session.
+/// the first responder back to a session. Files dropped on it are typed in as
+/// shell-escaped paths.
 final class SessionTerminalView: TerminalView {
     weak var session: TerminalSession?
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        Self.fileURLs(in: sender).isEmpty ? [] : .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = Self.fileURLs(in: sender)
+        guard let session, !urls.isEmpty else { return false }
+        session.insert(paths: urls.map(\.path))
+        window?.makeFirstResponder(self)
+        return true
+    }
+
+    private static func fileURLs(in info: NSDraggingInfo) -> [URL] {
+        info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+    }
+}
+
+/// Why a tab wants attention. Ordered by importance.
+enum SessionActivity: Int, Comparable {
+    case output
+    case finished
+    case bell
+
+    static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
 }
 
 /// One shell process and the terminal view that renders it.
@@ -15,38 +41,56 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable {
     let id = UUID()
     let view: SessionTerminalView
 
+    /// The title the shell sets (OSC 0/2), or the shell's name.
     @Published private(set) var title: String
+    /// A name the user gave the tab; overrides `title` when set.
+    @Published var customName: String?
+    /// Set while the tab is out of sight and something happened in it.
+    @Published private(set) var activity: SessionActivity?
+
+    var displayTitle: String { customName ?? title }
 
     /// Called once the shell process exits.
     var onExit: (() -> Void)?
 
+    private let settings: SettingsStore
     private let shellPath: String
     private let launchDirectory: String
     private var process: LocalProcess?
     private var appliedSettings: TerminalSettings?
+    private var appliedBackgroundOpacity: Double?
     private var scrollFollow = ScrollFollow()
     private var isRestoringScroll = false
-    private var settingsSubscription: AnyCancellable?
+    private var commandStartedAt: Date?
+    private var lastForegroundCheck = Date.distantPast
+    private var subscriptions = Set<AnyCancellable>()
 
     init(settings: SettingsStore, directory: String?) {
         let configuration = settings.settings.terminal
+        self.settings = settings
         shellPath = Shell.resolve(configuredPath: configuration.shellPath)
-        launchDirectory = directory ?? NSHomeDirectory()
+        launchDirectory = directory.flatMap(Self.existingDirectory) ?? NSHomeDirectory()
         title = Shell.displayName(of: shellPath)
         view = SessionTerminalView(frame: NSRect(x: 0, y: 0, width: 640, height: 320))
         super.init()
 
         view.session = self
         view.terminalDelegate = self
+        view.registerForDraggedTypes([.fileURL])
         installClipboardHandler()
         updateScrollerVisibility(animated: false)
-        settingsSubscription = settings.publisher(\.terminal)
+        settings.publisher(\.terminal)
             .sink { [weak self] in self?.apply($0) }
+            .store(in: &subscriptions)
+        settings.publisher(\.appearance.backgroundOpacity)
+            .sink { [weak self] in self?.applyBackground(opacity: $0) }
+            .store(in: &subscriptions)
     }
 
     // MARK: - Lifecycle
 
-    func start() {
+    /// Launches the login shell, optionally typing `command` as its first input.
+    func start(running command: String? = nil) {
         guard process == nil else { return }
 
         let process = LocalProcess(delegate: self)
@@ -58,16 +102,105 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable {
             currentDirectory: launchDirectory
         )
         self.process = process
+
+        if let command = command?.trimmingCharacters(in: .whitespacesAndNewlines), !command.isEmpty {
+            // The shell reads it as type-ahead once its prompt is ready.
+            process.send(data: Array((command + "\r").utf8)[...])
+        }
     }
 
     func terminate() {
         onExit = nil
-        process?.terminate()
-        process = nil
+        guard let process else { return }
+        let pid = process.shellPid
+        process.terminate()
+        self.process = nil
+        if pid > 0 {
+            Self.hangUp(pid)
+        }
+    }
+
+    /// SwiftTerm only sends SIGTERM, which interactive shells ignore, so a
+    /// closed tab would keep its shell (and this session) alive. Hang up the
+    /// way a real terminal does, escalate if the shell lingers, and reap it.
+    private nonisolated static func hangUp(_ pid: pid_t) {
+        kill(pid, SIGHUP)
+        DispatchQueue.global(qos: .utility).async {
+            for _ in 0..<20 {
+                if waitpid(pid, nil, WNOHANG) != 0 || kill(pid, 0) != 0 {
+                    return
+                }
+                usleep(100_000)
+            }
+            kill(pid, SIGKILL)
+            waitpid(pid, nil, 0)
+        }
     }
 
     func focus() {
         view.window?.makeFirstResponder(view)
+    }
+
+    /// Types shell-escaped paths at the prompt, separated by spaces.
+    func insert(paths: [String]) {
+        let text = paths.map(ShellEscaping.escape).joined(separator: " ") + " "
+        view.send(data: Array(text.utf8)[...])
+    }
+
+    /// Shows SwiftTerm's find bar, or jumps between matches.
+    func find(_ direction: FindDirection) {
+        let action: NSFindPanelAction = switch direction {
+        case .show: .showFindPanel
+        case .next: .next
+        case .previous: .previous
+        }
+        let item = NSMenuItem()
+        item.tag = Int(action.rawValue)
+        view.performFindPanelAction(item)
+    }
+
+    // MARK: - Activity
+
+    /// True while the terminal is in a visible window the user can see.
+    var isOnScreen: Bool {
+        guard let window = view.window, window.isVisible else { return false }
+        return (window as? NotchPanel)?.isOpen ?? true
+    }
+
+    func markSeen() {
+        if activity != nil {
+            activity = nil
+        }
+    }
+
+    private func noteActivity(_ kind: SessionActivity) {
+        guard !isOnScreen else { return }
+        if activity.map({ $0 < kind }) ?? true {
+            activity = kind
+        }
+    }
+
+    /// Detects commands finishing by watching the terminal's foreground
+    /// process group return to the shell. Throttled; called on I/O.
+    private func checkForegroundProcess(force: Bool = false) {
+        let now = Date()
+        guard force || now.timeIntervalSince(lastForegroundCheck) > 0.25 else { return }
+        lastForegroundCheck = now
+        guard let process, process.childfd >= 0, process.shellPid > 0 else { return }
+
+        let foreground = tcgetpgrp(process.childfd)
+        guard foreground > 0 else { return }
+        if foreground != process.shellPid {
+            if commandStartedAt == nil {
+                commandStartedAt = now
+            }
+        } else if let started = commandStartedAt {
+            commandStartedAt = nil
+            let activitySettings = settings.settings.activity
+            if activitySettings.finishedCommands, now.timeIntervalSince(started) >= activitySettings.minimumCommandSeconds {
+                noteActivity(.finished)
+            }
+        }
     }
 
     /// The shell's working directory, used so new tabs open where you are.
@@ -204,6 +337,18 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable {
             terminal.changeHistorySize(max(0, settings.scrollbackLines))
         }
         view.optionAsMetaKey = settings.optionAsMeta
+        if previous?.theme != settings.theme, let opacity = appliedBackgroundOpacity {
+            applyBackground(opacity: opacity)
+        }
+    }
+
+    /// When translucent, the terminal draws no background of its own and the
+    /// window's (blurred) background shows through; text stays opaque.
+    private func applyBackground(opacity: Double) {
+        appliedBackgroundOpacity = opacity
+        let background = (appliedSettings?.theme ?? settings.settings.terminal.theme).palette.backgroundColor
+        view.nativeBackgroundColor = opacity < 1 ? background.withAlphaComponent(0) : background
+        view.layer?.isOpaque = opacity >= 1
     }
 
     // MARK: - Helpers
@@ -220,6 +365,12 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
         }
+    }
+
+    private static func existingDirectory(_ path: String) -> String? {
+        let expanded = (path as NSString).expandingTildeInPath
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: expanded, isDirectory: &isDirectory) && isDirectory.boolValue ? expanded : nil
     }
 
     private static func workingDirectory(of pid: pid_t) -> String? {
@@ -247,6 +398,10 @@ extension TerminalSession: LocalProcessDelegate {
     /// SwiftTerm delivers data on the main queue (the default for `LocalProcess`).
     nonisolated func dataReceived(slice: ArraySlice<UInt8>) {
         MainActor.assumeIsolated {
+            checkForegroundProcess()
+            if settings.settings.activity.output {
+                noteActivity(.output)
+            }
             guard let anchor = scrollFollow.restorePosition(canScroll: view.canScroll) else {
                 view.feed(byteArray: slice)
                 return
@@ -274,6 +429,12 @@ extension TerminalSession: TerminalViewDelegate {
                 updateScrollerVisibility()
             }
             process?.send(data: data)
+            if data.contains(0x0D) {
+                // A command may have just started; look once the shell has forked.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    self?.checkForegroundProcess(force: true)
+                }
+            }
         }
     }
 
@@ -313,7 +474,14 @@ extension TerminalSession: TerminalViewDelegate {
     }
 
     nonisolated func bell(source: TerminalView) {
-        DispatchQueue.main.async { NSSound.beep() }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if self.settings.settings.activity.bell, !self.isOnScreen {
+                self.noteActivity(.bell)
+            } else {
+                NSSound.beep()
+            }
+        }
     }
 
     nonisolated func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}

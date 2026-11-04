@@ -86,3 +86,28 @@ final class MouseWheelTests: XCTestCase {
         XCTAssertEqual(bottomRight.row, 19)
     }
 }
+
+final class ShellEscapingTests: XCTestCase {
+    func testEscapesLikeTerminalApp() {
+        XCTAssertEqual(ShellEscaping.escape("/Users/me/My File (1).txt"), "/Users/me/My\\ File\\ \\(1\\).txt")
+        XCTAssertEqual(ShellEscaping.escape("/tmp/it's"), "/tmp/it\\'s")
+        XCTAssertEqual(ShellEscaping.escape("/usr/bin/env"), "/usr/bin/env")
+    }
+}
+
+final class TextEditingKeysTests: XCTestCase {
+    private func action(_ keyCode: Int, _ flags: NSEvent.ModifierFlags) -> Selector? {
+        let event = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0, context: nil,
+            characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: UInt16(keyCode)
+        )!
+        return TextEditingKeys.action(for: event)
+    }
+
+    func testStandardEditingShortcuts() {
+        XCTAssertEqual(action(kVK_ANSI_A, .command), #selector(NSText.selectAll(_:)))
+        XCTAssertEqual(action(kVK_ANSI_V, .command), #selector(NSText.paste(_:)))
+        XCTAssertEqual(action(kVK_ANSI_Z, [.command, .shift]), Selector(("redo:")))
+        XCTAssertNil(action(kVK_ANSI_T, .command))
+    }
+}

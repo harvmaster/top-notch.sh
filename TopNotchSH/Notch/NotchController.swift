@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 @MainActor
@@ -30,6 +31,15 @@ final class NotchController: ObservableObject {
     @Published private(set) var geometry: ScreenGeometry
     @Published private(set) var workspace: Workspace
     @Published private(set) var isResizing = false
+    /// A pinned notch stays open when another app takes focus.
+    @Published private(set) var isPinned = false
+    /// Activity in the shown workspace, displayed beside the closed notch.
+    @Published private(set) var activity: SessionActivity?
+
+    /// Extra width on each side of the closed notch for the activity indicator.
+    static let indicatorWidth: CGFloat = 40
+    /// Clear space between the indicator and the notch's visible edge.
+    static let indicatorInset: CGFloat = 10
 
     weak var delegate: NotchControllerDelegate?
 
@@ -38,6 +48,7 @@ final class NotchController: ObservableObject {
     private let canvas: NotchCanvasView
     private var transitionID = 0
     private var resizeOrigin: (size: CGSize, mouse: CGPoint)?
+    private var activitySubscription: AnyCancellable?
 
     init(geometry: ScreenGeometry, workspace: Workspace, settings: SettingsStore, workspaces: WorkspaceStore) {
         self.geometry = geometry
@@ -58,8 +69,10 @@ final class NotchController: ObservableObject {
         )
         panel.contentView = canvas
         panel.onResignKey = { [weak self] in self?.focusLost() }
+        setHiddenFromScreenSharing(settings.settings.general.hideFromScreenSharing)
         fitPanel(to: size, margin: 0)
         panel.orderFrontRegardless()
+        observeActivity()
     }
 
     var id: ScreenID { geometry.id }
@@ -75,6 +88,12 @@ final class NotchController: ObservableObject {
 
         panel.isOpen = true
         transition(to: .open, size: geometry.openSize(for: settings.settings.sizing), animation: openAnimation)
+        focus()
+    }
+
+    /// Brings an open notch's terminal to the front and gives it the keyboard.
+    func focus() {
+        guard isOpen else { return }
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         workspace.activeTab?.focus()
@@ -83,9 +102,19 @@ final class NotchController: ObservableObject {
     func close() {
         guard phase == .open else { return }
         endResize()
+        isPinned = false
         panel.isOpen = false
-        transition(to: .closed, size: geometry.closedSize(for: settings.settings.sizing), animation: closeAnimation)
+        transition(to: .closed, size: closedSize, animation: closeAnimation)
         delegate?.notchDidClose(self)
+    }
+
+    func togglePin() {
+        guard isOpen else { return }
+        isPinned.toggle()
+    }
+
+    func setHiddenFromScreenSharing(_ hidden: Bool) {
+        panel.sharingType = hidden ? .none : .readOnly
     }
 
     func toggle() {
@@ -104,6 +133,30 @@ final class NotchController: ObservableObject {
         if isOpen {
             workspace.ensureTab()
         }
+        observeActivity()
+    }
+
+    /// The closed notch widens to make room for an indicator when a tab in
+    /// the shown workspace needs attention.
+    private var closedSize: CGSize {
+        var size = geometry.closedSize(for: settings.settings.sizing)
+        if activity != nil {
+            size.width += Self.indicatorWidth * 2
+        }
+        return size
+    }
+
+    private func observeActivity() {
+        activitySubscription = workspace.$activity
+            .removeDuplicates()
+            .sink { [weak self] activity in
+                guard let self else { return }
+                let wasShowing = self.activity != nil
+                self.activity = activity
+                if !self.isOpen, wasShowing != (activity != nil) {
+                    self.transition(to: .closed, size: self.closedSize, animation: self.openAnimation)
+                }
+            }
     }
 
     /// Re-measures after a display or settings change and animates to the new size.
@@ -115,7 +168,7 @@ final class NotchController: ObservableObject {
         guard !isResizing else { return }
 
         let sizing = settings.settings.sizing
-        let target = isOpen ? geometry.openSize(for: sizing) : geometry.closedSize(for: sizing)
+        let target = isOpen ? geometry.openSize(for: sizing) : closedSize
         guard target != size else {
             fitPanel(to: size, margin: restingMargin)
             return
@@ -202,7 +255,7 @@ final class NotchController: ObservableObject {
     }
 
     private func focusLost() {
-        guard settings.settings.general.closeOnFocusLoss else { return }
+        guard settings.settings.general.closeOnFocusLoss, !isPinned else { return }
         close()
     }
 

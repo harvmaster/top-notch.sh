@@ -2,18 +2,31 @@ import Carbon.HIToolbox
 import XCTest
 @testable import TopNotchSH
 
+/// A fresh, empty config directory per test.
+func temporaryConfig() -> ConfigDirectory {
+    ConfigDirectory(url: FileManager.default.temporaryDirectory.appending(path: "TopNotchSHTests-\(UUID().uuidString)", directoryHint: .isDirectory))
+}
+
 final class SettingsTests: XCTestCase {
-    private var defaults: UserDefaults!
+    private var config: ConfigDirectory!
 
     override func setUp() {
-        defaults = UserDefaults(suiteName: "TopNotchSHTests.\(UUID().uuidString)")
+        config = temporaryConfig()
+    }
+
+    override func tearDown() {
+        try? FileManager.default.removeItem(at: config.url)
+    }
+
+    private func writeSettings(_ json: String) throws {
+        try FileManager.default.createDirectory(at: config.url, withIntermediateDirectories: true)
+        try Data(json.utf8).write(to: config.settings.url)
     }
 
     func testMissingKeysFallBackToDefaults() throws {
-        let partial = #"{"terminal":{"fontSize":17},"hotkeys":{"newTab":{"modifiers":1048576,"keyCode":45}}}"#
-        defaults.set(Data(partial.utf8), forKey: "settings")
+        try writeSettings(#"{"terminal":{"fontSize":17},"hotkeys":{"newTab":{"modifiers":1048576,"keyCode":45}}}"#)
 
-        let settings = JSONDefaults<AppSettings>(key: "settings", defaults: defaults).load(fallback: AppSettings())
+        let settings = try XCTUnwrap(config.settings.load(defaults: AppSettings()))
 
         XCTAssertEqual(settings.terminal.fontSize, 17)
         XCTAssertEqual(settings.terminal.theme, .classic)
@@ -22,19 +35,36 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(settings.padding, PaddingSettings())
     }
 
-    func testRoundTrip() {
-        let store = JSONDefaults<AppSettings>(key: "settings", defaults: defaults)
+    func testRoundTripWritesReadableJSON() throws {
         var settings = AppSettings()
         settings.padding.notched.bottom = 22
         settings.sizePresets.removeLast()
-        store.save(settings)
+        config.settings.save(settings)
 
-        XCTAssertEqual(store.load(fallback: AppSettings()), settings)
+        XCTAssertEqual(try config.settings.load(defaults: AppSettings()), settings)
+        let text = try String(contentsOf: config.settings.url, encoding: .utf8)
+        XCTAssertTrue(text.contains("\n  \"activity\" : {"), "pretty-printed with sorted keys")
     }
 
-    func testCorruptDataFallsBack() {
-        defaults.set(Data("not json".utf8), forKey: "settings")
-        XCTAssertEqual(JSONDefaults<AppSettings>(key: "settings", defaults: defaults).load(fallback: AppSettings()), AppSettings())
+    func testMissingFileLoadsNothing() throws {
+        XCTAssertNil(try config.settings.load(defaults: AppSettings()))
+    }
+
+    func testInvalidFileIsBackedUpNotOverwritten() throws {
+        try writeSettings("{ not json")
+        XCTAssertEqual(config.settings.loadOrBackUp(defaults: AppSettings()), AppSettings())
+        let backup = config.settings.url.appendingPathExtension("invalid")
+        XCTAssertEqual(try String(contentsOf: backup, encoding: .utf8), "{ not json")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: config.settings.url.path))
+    }
+
+    func testMigratesFromUserDefaultsOnce() throws {
+        let defaults = UserDefaults(suiteName: "TopNotchSHTests.\(UUID().uuidString)")!
+        defaults.set(Data(#"{"terminal":{"fontSize":19}}"#.utf8), forKey: "settings")
+        config.migrateFromUserDefaults(defaults)
+
+        XCTAssertEqual(try config.settings.load(defaults: AppSettings())?.terminal.fontSize, 19)
+        XCTAssertNil(defaults.data(forKey: "settings"), "migrated keys are removed")
     }
 
     func testDefaultHotkeysAreUnique() {
@@ -79,11 +109,27 @@ final class KeyChordTests: XCTestCase {
 final class SettingsStoreTests: XCTestCase {
     /// Subscribers must see the new value when they read the store, not the old one.
     func testPublisherFiresAfterTheChange() {
-        let store = SettingsStore(defaults: UserDefaults(suiteName: "TopNotchSHTests.\(UUID().uuidString)")!)
+        let store = SettingsStore(file: temporaryConfig().settings)
         var observed: [Double] = []
         let subscription = store.publisher(\.sizing.openWidth).sink { _ in observed.append(store.settings.sizing.openWidth) }
         store.update { $0.sizing.openWidth = 480 }
         subscription.cancel()
         XCTAssertEqual(observed, [640, 480])
+    }
+
+    func testHandEditsReloadButTyposAreIgnored() throws {
+        let config = temporaryConfig()
+        let store = SettingsStore(file: config.settings)
+        store.update { $0.terminal.fontSize = 15 }
+
+        var edited = try String(contentsOf: config.settings.url, encoding: .utf8)
+        edited = edited.replacingOccurrences(of: "\"fontSize\" : 15", with: "\"fontSize\" : 21")
+        try Data(edited.utf8).write(to: config.settings.url)
+        store.reloadFromDisk()
+        XCTAssertEqual(store.settings.terminal.fontSize, 21)
+
+        try Data("{ broken".utf8).write(to: config.settings.url)
+        store.reloadFromDisk()
+        XCTAssertEqual(store.settings.terminal.fontSize, 21, "an invalid file keeps the current settings")
     }
 }

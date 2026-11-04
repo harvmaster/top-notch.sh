@@ -8,6 +8,7 @@ struct TopNotchSHApp: App {
     var body: some Scene {
         MenuBarExtra("Top NotchSH", systemImage: "apple.terminal", isInserted: delegate.menuBarIconBinding) {
             Button("Toggle Notch") { delegate.model.perform(.toggleNotch) }
+            Toggle("Hide from Screen Sharing", isOn: delegate.model.settings.binding(\.general.hideFromScreenSharing))
             Divider()
             Button("Settings…") { delegate.model.perform(.showSettings) }
                 .keyboardShortcut(",")
@@ -26,12 +27,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     override init() {
         #if DEBUG
-        model = SelfTest.isRequested ? AppModel(defaults: SelfTest.defaults) : AppModel()
+        model = SelfTest.isRequested ? AppModel(config: SelfTest.config) : AppModel()
         #else
         model = AppModel()
         #endif
         super.init()
-        subscription = model.settings.publisher(\.general.showMenuBarIcon)
+        // The menu reads these settings, so it must refresh when they change.
+        subscription = model.settings.publisher(\.general)
             .dropFirst()
             .sink { [weak self] _ in self?.objectWillChange.send() }
     }

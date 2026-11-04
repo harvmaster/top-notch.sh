@@ -44,9 +44,21 @@ final class TerminalContainerView: NSView {
         focusIfKey()
     }
 
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        markSeen()
+    }
+
     /// Whenever a terminal appears in the key window, it takes keyboard focus.
     private func focusIfKey() {
+        markSeen()
         guard let window, window.isKeyWindow, let hosted, hosted.superview === self else { return }
         window.makeFirstResponder(hosted)
+    }
+
+    /// Showing a terminal clears its pending activity badge.
+    private func markSeen() {
+        guard window != nil, let terminal = hosted as? SessionTerminalView, terminal.superview === self else { return }
+        terminal.session?.markSeen()
     }
 }

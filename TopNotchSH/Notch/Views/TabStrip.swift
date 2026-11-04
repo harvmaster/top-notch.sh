@@ -12,7 +12,10 @@ struct TabStrip: View {
     private static let settle = Animation.spring(response: 0.24, dampingFraction: 0.9)
 
     @ObservedObject var workspace: Workspace
+    /// Moves the active tab into its own window.
+    var detachActiveTab: () -> Void = {}
 
+    @State private var renamingID: TerminalSession.ID?
     @State private var frames: [TerminalSession.ID: CGRect] = [:]
     @State private var drag: TabDrag<TerminalSession.ID>?
     /// Committed separately from `drag.translation` so neighbours animate
@@ -53,6 +56,11 @@ struct TabStrip: View {
             isActive: tab.id == workspace.activeTabID,
             isLifted: isDragged,
             canClose: workspace.tabs.count > 1,
+            isRenaming: Binding(
+                get: { renamingID == tab.id },
+                set: { if !$0 { renamingID = nil } }
+            ),
+            onRename: { workspace.renameTab(tab.id, to: $0) },
             onClose: { workspace.closeTab(tab.id) }
         )
         .frame(minWidth: 44, maxWidth: 200)
@@ -64,6 +72,21 @@ struct TabStrip: View {
         .offset(x: offset(for: tab.id))
         .zIndex(isDragged ? 1 : 0)
         .onTapGesture { workspace.selectTab(tab.id) }
+        .simultaneousGesture(TapGesture(count: 2).onEnded { renamingID = tab.id })
+        .contextMenu {
+            Button("Rename Tab…") {
+                workspace.selectTab(tab.id)
+                renamingID = tab.id
+            }
+            Button("Move Tab to Window") {
+                workspace.selectTab(tab.id)
+                detachActiveTab()
+            }
+            Divider()
+            Button("Close Tab") { workspace.closeTab(tab.id) }
+            Button("Close Other Tabs") { workspace.closeOtherTabs(than: tab.id) }
+                .disabled(workspace.tabs.count < 2)
+        }
         .gesture(
             DragGesture(minimumDistance: 3, coordinateSpace: .named(Self.space))
                 .onChanged { dragChanged(tab.id, translation: $0.translation.width) }
@@ -188,17 +211,46 @@ private struct TabItem: View {
     let isActive: Bool
     let isLifted: Bool
     let canClose: Bool
+    @Binding var isRenaming: Bool
+    let onRename: (String?) -> Void
     let onClose: () -> Void
+
+    @State private var draft = ""
+    @FocusState private var isFieldFocused: Bool
 
     var body: some View {
         HStack(spacing: 5) {
-            Text(session.title)
-                .font(.system(size: 11, weight: isActive ? .medium : .regular))
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(maxWidth: .infinity)
+            if let activity = session.activity, !isActive {
+                Circle()
+                    .fill(activity.color)
+                    .frame(width: 5, height: 5)
+                    .shadow(color: activity.color, radius: 2)
+            }
 
-            if isActive && canClose && !isLifted {
+            if isRenaming {
+                TextField("Tab name", text: $draft, prompt: Text(session.title))
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11, weight: .medium))
+                    .multilineTextAlignment(.center)
+                    .focused($isFieldFocused)
+                    .onAppear {
+                        draft = session.customName ?? ""
+                        isFieldFocused = true
+                    }
+                    .onSubmit(commit)
+                    .onExitCommand { isRenaming = false }
+                    .onChange(of: isFieldFocused) { _, focused in
+                        if !focused { commit() }
+                    }
+            } else {
+                Text(session.displayTitle)
+                    .font(.system(size: 11, weight: isActive ? .medium : .regular))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity)
+            }
+
+            if isActive && canClose && !isLifted && !isRenaming {
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                         .font(.system(size: 8, weight: .bold))
@@ -223,6 +275,14 @@ private struct TabItem: View {
         )
         .scaleEffect(isLifted ? 1.05 : 1)
         .contentShape(Rectangle())
+    }
+
+    /// An empty name restores the shell's own title.
+    private func commit() {
+        guard isRenaming else { return }
+        onRename(draft)
+        isRenaming = false
+        session.focus()
     }
 }
 

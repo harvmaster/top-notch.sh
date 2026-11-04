@@ -26,9 +26,8 @@ struct OpenNotchView: View {
             .padding(.horizontal, insets.horizontal)
             .padding(.bottom, insets.bottom)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(nsColor: settings.terminal.theme.palette.backgroundColor))
 
-            TabStrip(workspace: workspace)
+            TabStrip(workspace: workspace) { controller.perform(.detachTab) }
                 .frame(height: Self.tabStripHeight)
                 .padding(.horizontal, max(10, settings.appearance.openCornerRadius * 0.6))
                 .padding(.trailing, 18) // room for the resize grip
@@ -39,7 +38,7 @@ struct OpenNotchView: View {
 // MARK: - Header
 
 private struct NotchHeader: View {
-    let controller: NotchController
+    @ObservedObject var controller: NotchController
     @ObservedObject var workspace: Workspace
 
     var body: some View {
@@ -55,6 +54,13 @@ private struct NotchHeader: View {
             Spacer(minLength: notchGap)
 
             HStack(spacing: 2) {
+                HeaderButton(
+                    symbol: controller.isPinned ? "pin.fill" : "pin",
+                    help: controller.isPinned ? "Unpin (closes when you click elsewhere)" : "Pin open",
+                    isOn: controller.isPinned
+                ) {
+                    controller.perform(.togglePin)
+                }
                 HeaderButton(symbol: "rectangle.portrait.and.arrow.right", help: "Detach tab to window") {
                     controller.perform(.detachTab)
                 }
@@ -71,6 +77,7 @@ private struct NotchHeader: View {
 private struct HeaderButton: View {
     let symbol: String
     let help: String
+    var isOn = false
     let action: () -> Void
 
     var body: some View {
@@ -80,20 +87,23 @@ private struct HeaderButton: View {
                 .frame(width: 22, height: 20)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(NotchButtonStyle())
+        .buttonStyle(NotchButtonStyle(isOn: isOn))
         .help(help)
         .accessibilityLabel(help)
+        .accessibilityAddTraits(isOn ? .isSelected : [])
     }
 }
 
 /// Subtle press feedback that suits the black panel.
 struct NotchButtonStyle: ButtonStyle {
+    var isOn = false
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .foregroundStyle(.white.opacity(configuration.isPressed ? 0.95 : 0.5))
+            .foregroundStyle(isOn ? Color.accentColor : .white.opacity(configuration.isPressed ? 0.95 : 0.5))
             .background(
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(.white.opacity(configuration.isPressed ? 0.14 : 0))
+                    .fill(.white.opacity(configuration.isPressed ? 0.14 : isOn ? 0.1 : 0))
             )
             .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
     }

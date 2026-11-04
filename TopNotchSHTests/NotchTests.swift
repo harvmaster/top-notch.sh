@@ -48,16 +48,26 @@ final class ScreenGeometryTests: XCTestCase {
 @MainActor
 final class WorkspaceTests: XCTestCase {
     private var settings: SettingsStore!
-    private var defaults: UserDefaults!
+    private var config: ConfigDirectory!
 
     override func setUp() async throws {
-        defaults = UserDefaults(suiteName: "TopNotchSHTests.\(UUID().uuidString)")
-        settings = SettingsStore(defaults: defaults)
+        config = temporaryConfig()
+        settings = SettingsStore(file: config.settings)
     }
 
-    /// Sessions are never started, so no shells are spawned.
+    /// Records what each new session was asked for. Sessions are never
+    /// started, so no shells are spawned.
+    private var launches: [(directory: String?, command: String?)] = []
+
+    private var factory: Workspace.SessionFactory {
+        { [unowned self] directory, command in
+            self.launches.append((directory, command))
+            return TerminalSession(settings: self.settings, directory: directory)
+        }
+    }
+
     private func makeWorkspace() -> Workspace {
-        Workspace(name: "Test") { [settings] in TerminalSession(settings: settings!, directory: $0) }
+        Workspace(name: "Test", makeSession: factory)
     }
 
     func testWorkspaceIsLazyUntilShown() {
@@ -130,8 +140,7 @@ final class WorkspaceTests: XCTestCase {
     }
 
     func testStorePersistsNamesAndHotkeys() {
-        let factory: Workspace.SessionFactory = { [settings] in TerminalSession(settings: settings!, directory: $0) }
-        let store = WorkspaceStore(defaults: defaults, makeSession: factory)
+        let store = WorkspaceStore(file: config.workspaces, makeSession: factory)
         XCTAssertEqual(store.workspaces.map(\.name), ["Main"])
 
         let second = store.create()
@@ -139,13 +148,97 @@ final class WorkspaceTests: XCTestCase {
         store.rename(second, to: "  Servers ")
         store.setHotkey(.command(1), for: second)
 
-        let reloaded = WorkspaceStore(defaults: defaults, makeSession: factory)
+        let reloaded = WorkspaceStore(file: config.workspaces, makeSession: factory)
         XCTAssertEqual(reloaded.workspaces.map(\.name), ["Main", "Servers"])
         XCTAssertEqual(reloaded.workspaces.last?.hotkey, .command(1))
     }
 
+    func testRestoresRememberedTabsLazily() {
+        let workspace = Workspace(
+            name: "Restored",
+            restoring: [TabRecord(directory: "/usr", name: "logs"), TabRecord(directory: "/tmp", name: nil)],
+            activeIndex: 1,
+            makeSession: factory
+        )
+        XCTAssertTrue(workspace.tabs.isEmpty)
+        XCTAssertEqual(workspace.tabRecords.count, 2, "unopened tabs are still saved")
+
+        workspace.ensureTab()
+        XCTAssertEqual(launches.map(\.directory), ["/usr", "/tmp"])
+        XCTAssertEqual(workspace.tabs.map(\.customName), ["logs", nil])
+        XCTAssertEqual(workspace.activeIndex, 1)
+    }
+
+    func testWorkspaceFolderAndCommandApplyToNewTabs() {
+        let workspace = Workspace(name: "Servers", directory: "/var", startupCommand: "ssh box", makeSession: factory)
+        workspace.ensureTab()
+        XCTAssertEqual(launches.first?.directory, "/var")
+        XCTAssertEqual(launches.first?.command, "ssh box")
+    }
+
+    func testReopenClosedTab() {
+        let workspace = makeWorkspace()
+        workspace.newTab()
+        workspace.newTab()
+        workspace.renameTab(workspace.activeTabID!, to: "build")
+        XCTAssertFalse(workspace.canReopenClosedTab)
+
+        workspace.closeActiveTab()
+        XCTAssertTrue(workspace.canReopenClosedTab)
+        workspace.reopenClosedTab()
+        XCTAssertEqual(workspace.tabs.count, 2)
+        XCTAssertEqual(workspace.activeTab?.customName, "build")
+        XCTAssertFalse(workspace.canReopenClosedTab)
+    }
+
+    func testRenamingTabs() {
+        let workspace = makeWorkspace()
+        workspace.newTab()
+        let id = workspace.activeTabID!
+        workspace.renameTab(id, to: "  api  ")
+        XCTAssertEqual(workspace.activeTab?.displayTitle, "api")
+        workspace.renameTab(id, to: "")
+        XCTAssertNil(workspace.activeTab?.customName)
+        XCTAssertEqual(workspace.activeTab?.displayTitle, workspace.activeTab?.title)
+    }
+
+    func testCloseOtherTabs() {
+        let workspace = makeWorkspace()
+        (0..<3).forEach { _ in workspace.newTab() }
+        let keep = workspace.tabs[1].id
+        workspace.closeOtherTabs(than: keep)
+        XCTAssertEqual(workspace.tabs.map(\.id), [keep])
+    }
+
+    func testStorePersistsTabsFoldersAndCommands() {
+        let store = WorkspaceStore(file: config.workspaces, makeSession: factory)
+        let main = store.primary
+        store.setDirectory("~/Projects", for: main)
+        store.setStartupCommand("  ", for: main)
+        main.ensureTab()
+        main.renameTab(main.activeTabID!, to: "editor")
+        store.persist()
+
+        let reloaded = WorkspaceStore(file: config.workspaces, makeSession: factory)
+        XCTAssertEqual(reloaded.primary.directory, "~/Projects")
+        XCTAssertNil(reloaded.primary.startupCommand, "blank commands are not saved")
+        XCTAssertEqual(reloaded.primary.tabRecords.map(\.name), ["editor"])
+
+        let fresh = WorkspaceStore(file: config.workspaces, restoresTabs: { false }, makeSession: factory)
+        XCTAssertTrue(fresh.primary.tabRecords.isEmpty, "restore can be turned off")
+    }
+
+    func testMovingWorkspaces() {
+        let store = WorkspaceStore(file: config.workspaces, makeSession: factory)
+        let second = store.create()
+        store.move(second, by: -1)
+        XCTAssertTrue(store.workspaces.first === second)
+        store.move(second, by: -1)
+        XCTAssertTrue(store.workspaces.first === second, "can't move past the top")
+    }
+
     func testDeleteKeepsOneWorkspaceAndReturnsFallback() {
-        let store = WorkspaceStore(defaults: defaults) { [settings] in TerminalSession(settings: settings!, directory: $0) }
+        let store = WorkspaceStore(file: config.workspaces, makeSession: factory)
         let main = store.primary
         XCTAssertNil(store.delete(main))
 

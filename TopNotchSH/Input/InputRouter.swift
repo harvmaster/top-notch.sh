@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import Combine
 
 /// Turns keyboard and scroll events into `Command`s and terminal input.
@@ -79,6 +80,12 @@ final class InputRouter {
             return true
         }
 
+        if window.firstResponder is NSText, let action = TextEditingKeys.action(for: event) {
+            // A menu-bar-only app has no Edit menu, so text fields would
+            // otherwise ignore ⌘A / ⌘C / ⌘V / ⌘X / ⌘Z.
+            return NSApp.sendAction(action, to: nil, from: nil)
+        }
+
         guard let session = (window.firstResponder as? SessionTerminalView)?.session else { return false }
 
         if let action = action(in: .terminal, matching: event) {
@@ -113,5 +120,21 @@ final class InputRouter {
 
     private func action(in scope: HotkeyAction.Scope, matching event: NSEvent) -> HotkeyAction? {
         HotkeyAction.allCases.first { $0.scope == scope && settings.settings.chord(for: $0).matches(event) }
+    }
+}
+
+/// Standard text-editing shortcuts, normally supplied by an app's Edit menu.
+enum TextEditingKeys {
+    static func action(for event: NSEvent) -> Selector? {
+        let flags = event.modifierFlags.intersection(KeyChord.relevantModifiers)
+        switch (flags, Int(event.keyCode)) {
+        case (.command, kVK_ANSI_A): return #selector(NSText.selectAll(_:))
+        case (.command, kVK_ANSI_C): return #selector(NSText.copy(_:))
+        case (.command, kVK_ANSI_V): return #selector(NSText.paste(_:))
+        case (.command, kVK_ANSI_X): return #selector(NSText.cut(_:))
+        case (.command, kVK_ANSI_Z): return Selector(("undo:"))
+        case ([.command, .shift], kVK_ANSI_Z): return Selector(("redo:"))
+        default: return nil
+        }
     }
 }
