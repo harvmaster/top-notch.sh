@@ -10,7 +10,7 @@ A terminal that lives in your Mac's notch. Press a shortcut from any app and a t
 
 You need a Mac with Apple silicon (M1 or newer) running macOS 14 Sonoma or later.
 
-1. Download the latest `TopNotchSH-<version>.dmg` from the [Releases page](https://github.com/harvmaster/top-notchsh/releases/latest).
+1. Download the latest `TopNotchSH-<version>.dmg` from the [Releases page](https://github.com/harvmaster/top-notch.sh/releases/latest).
 2. Open it and drag **Top NotchSH** into **Applications**.
 3. Open Top NotchSH from Applications.
 4. The welcome window shows the shortcut that opens the terminal. Press it to try it out.
@@ -98,8 +98,8 @@ Your tabs reopen in their folders after an update.
 **The shortcut doesn't do anything.**
 Another app, or macOS itself, might be using it. Top NotchSH warns you in Settings → Hotkeys when it can tell. Pick a different shortcut there.
 
-**Moving the mouse prints strange characters, or the arrow keys stop working.**
-A program probably closed without tidying up. Press **⌘R** to put the terminal back to normal. Your shell and its history are untouched.
+**Moving the mouse prints strange characters, or the arrow keys or ⌃C stop working.**
+A program probably closed without tidying up, for example when an SSH connection drops. Press **⌘R** to put the terminal back to normal and get a fresh prompt. Your shell, its history and the text on screen are untouched.
 
 **A command says it isn't allowed to control another app, or to use the camera or microphone.**
 macOS asks permission for Top NotchSH on behalf of the commands you run. Allow it in the prompt, or later in **System Settings → Privacy & Security**.
@@ -128,8 +128,8 @@ Bug reports, ideas and pull requests are welcome. Please open an issue first for
 You need Xcode 16 or newer and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`).
 
 ```bash
-git clone https://github.com/harvmaster/top-notchsh.git
-cd top-notchsh
+git clone https://github.com/harvmaster/top-notch.sh.git
+cd top-notch.sh
 xcodegen generate
 open TopNotchSH.xcodeproj
 ```

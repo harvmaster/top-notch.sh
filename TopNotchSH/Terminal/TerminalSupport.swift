@@ -54,17 +54,35 @@ enum TerminalFont {
 
 /// Escape sequences that return the terminal to a sane input state.
 enum TerminalModes {
-    static let resetSequence: [UInt8] = Array([
-        "\u{1b}[?1049l",                     // leave the alternate screen
-        "\u{1b}[?9l", "\u{1b}[?1000l", "\u{1b}[?1002l", "\u{1b}[?1003l",
+    /// Pops every kitty keyboard mode a program pushed. Programs such as
+    /// Claude Code turn it on, and while it is on, keys like ⌃C reach the
+    /// shell as escape sequences it doesn't understand.
+    static let popKeyboardModes = "\u{1b}[<99u"
+
+    /// Input modes a program may have left on.
+    static let inputModes = [
+        "\u{1b}[?9l", "\u{1b}[?1000l", "\u{1b}[?1002l", "\u{1b}[?1003l", // mouse reporting
         "\u{1b}[?1004l",                     // focus reporting
         "\u{1b}[?1005l", "\u{1b}[?1006l", "\u{1b}[?1015l", "\u{1b}[?1016l", // mouse encodings
         "\u{1b}[?2004l",                     // bracketed paste
         "\u{1b}[?1l", "\u{1b}>",             // normal cursor keys and keypad
-        "\u{1b}[?7h",                        // auto-wrap
-        "\u{1b}[?25h",                       // show cursor
-        "\u{1b}[0m",
-    ].joined().utf8)
+    ].joined()
+
+    /// The sequence that undoes whatever a program left behind.
+    ///
+    /// Keyboard modes are kept per screen, so they are popped on the
+    /// alternate screen before leaving it, and again on the main screen.
+    /// Leaving the alternate screen also restores the cursor saved when the
+    /// program started, so it is only sent when the alternate screen is on:
+    /// otherwise the cursor would jump to a stale position.
+    static func resetSequence(inAlternateScreen: Bool) -> [UInt8] {
+        var sequence = ""
+        if inAlternateScreen {
+            sequence += popKeyboardModes + "\u{1b}[?1049l"
+        }
+        sequence += popKeyboardModes + inputModes
+        return Array(sequence.utf8)
+    }
 }
 
 /// Decides whether the viewport follows new output or stays where the user

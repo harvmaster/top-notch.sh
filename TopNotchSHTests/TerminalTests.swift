@@ -36,12 +36,58 @@ final class TerminalKeyMapTests: XCTestCase {
         XCTAssertNil(action(kVK_ANSI_R))
     }
 
-    func testResetSequenceDisablesMouseReporting() {
-        let sequence = String(decoding: TerminalModes.resetSequence, as: UTF8.self)
-        for mode in ["1000", "1002", "1003", "1006", "2004", "1049"] {
+    func testResetSequenceDisablesInputModes() {
+        let sequence = String(decoding: TerminalModes.resetSequence(inAlternateScreen: false), as: UTF8.self)
+        for mode in ["1000", "1002", "1003", "1004", "1006", "2004"] {
             XCTAssertTrue(sequence.contains("\u{1b}[?\(mode)l"), "missing reset for mode \(mode)")
         }
+        XCTAssertTrue(sequence.contains(TerminalModes.popKeyboardModes))
     }
+
+    /// Leaving the alternate screen restores a saved cursor, so it must only
+    /// happen when the alternate screen is actually on.
+    func testOnlyLeavesTheAlternateScreenWhenOnIt() {
+        let main = String(decoding: TerminalModes.resetSequence(inAlternateScreen: false), as: UTF8.self)
+        let alternate = String(decoding: TerminalModes.resetSequence(inAlternateScreen: true), as: UTF8.self)
+        XCTAssertFalse(main.contains("\u{1b}[?1049l"))
+        XCTAssertTrue(alternate.contains("\u{1b}[?1049l"))
+    }
+
+    /// Replays what a program like Claude Code inside tmux leaves behind,
+    /// then checks the reset undoes all of it without moving the cursor.
+    func testResetUndoesWhatAProgramLeftBehind() {
+        let terminal = Terminal(delegate: HeadlessDelegate(), options: TerminalOptions(cols: 40, rows: 10))
+        terminal.feed(text: "$ ssh host\r\n")
+        terminal.feed(text: "\u{1b}[?1049h\u{1b}[>1u\u{1b}[?1003h\u{1b}[?2004h\u{1b}[?1h\u{1b}[3;8r")
+        terminal.feed(text: "\u{1b}[?1049h\u{1b}[>1u\u{1b}[>1u")   // a nested program
+        XCTAssertTrue(terminal.isCurrentBufferAlternate)
+        XCTAssertFalse(terminal.keyboardEnhancementFlags.isEmpty)
+
+        terminal.feed(byteArray: TerminalModes.resetSequence(inAlternateScreen: terminal.isCurrentBufferAlternate))
+        terminal.softReset()
+
+        XCTAssertFalse(terminal.isCurrentBufferAlternate)
+        XCTAssertTrue(terminal.keyboardEnhancementFlags.isEmpty)
+        XCTAssertEqual(terminal.mouseMode, .off)
+        XCTAssertFalse(terminal.bracketedPasteMode)
+        XCTAssertFalse(terminal.applicationCursor)
+        XCTAssertEqual(terminal.buffer.scrollTop, 0)
+        XCTAssertEqual(terminal.buffer.scrollBottom, 9)
+        // Back where the program started, just below "$ ssh host".
+        XCTAssertEqual(terminal.buffer.y, 1)
+        XCTAssertEqual(terminal.buffer.x, 0)
+
+        // A second reset on the main screen must not move the cursor.
+        terminal.feed(text: "$ ")
+        terminal.feed(byteArray: TerminalModes.resetSequence(inAlternateScreen: terminal.isCurrentBufferAlternate))
+        terminal.softReset()
+        XCTAssertEqual(terminal.buffer.y, 1)
+        XCTAssertEqual(terminal.buffer.x, 2)
+    }
+}
+
+private final class HeadlessDelegate: TerminalDelegate {
+    func send(source: Terminal, data: ArraySlice<UInt8>) {}
 }
 
 final class ScrollFollowTests: XCTestCase {

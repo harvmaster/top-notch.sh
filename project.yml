@@ -7,9 +7,9 @@ options:
 settings:
   base:
     # The release version. Also the build number, which Sparkle compares.
-    MARKETING_VERSION: "0.1.0"
+    MARKETING_VERSION: "0.1.1"
     # Where releases (DMG + appcast.xml) are published.
-    GITHUB_REPOSITORY: harvmaster/top-notchsh
+    GITHUB_REPOSITORY: harvmaster/top-notch.sh
     SWIFT_VERSION: "5.0"
     MACOSX_DEPLOYMENT_TARGET: "14.0"
     # Apple silicon only.

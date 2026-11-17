@@ -44,7 +44,7 @@ final class NotchController: ObservableObject {
     weak var delegate: NotchControllerDelegate?
 
     private let settings: SettingsStore
-    let panel = NotchPanel()
+    private(set) var panel = NotchPanel()
     private let canvas: NotchCanvasView
     private var transitionID = 0
     private var resizeOrigin: (size: CGSize, mouse: CGPoint)?
@@ -67,8 +67,7 @@ final class NotchController: ObservableObject {
                     .environmentObject(workspaces)
             )
         )
-        panel.contentView = canvas
-        panel.onResignKey = { [weak self] in self?.focusLost() }
+        attach(to: panel)
         setHiddenFromScreenSharing(settings.settings.general.hideFromScreenSharing)
         fitPanel(to: size, margin: 0)
         panel.orderFrontRegardless()
@@ -114,7 +113,28 @@ final class NotchController: ObservableObject {
     }
 
     func setHiddenFromScreenSharing(_ hidden: Bool) {
-        panel.sharingType = hidden ? .none : .readOnly
+        guard !panel.setHiddenFromScreenSharing(hidden) else { return }
+        // macOS won't let a hidden window be shared again, so swap in a new
+        // panel showing the same content.
+        let old = panel
+        let wasKey = old.isKeyWindow
+        old.onResignKey = nil
+        old.contentView = nil
+        panel = NotchPanel()
+        panel.isOpen = old.isOpen
+        panel.setFrame(old.frame, display: false)
+        attach(to: panel)
+        panel.orderFrontRegardless()
+        old.orderOut(nil)
+        old.close()
+        if wasKey {
+            focus()
+        }
+    }
+
+    private func attach(to panel: NotchPanel) {
+        panel.contentView = canvas
+        panel.onResignKey = { [weak self] in self?.focusLost() }
     }
 
     func toggle() {

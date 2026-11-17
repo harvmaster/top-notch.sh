@@ -221,9 +221,37 @@ final class SelfTest {
         await key(kVK_ANSI_R, .command)
         check("⌘R turns off mouse reporting", await until { terminal.mouseMode == .off })
         check("⌘R leaves the alternate screen", !terminal.isCurrentBufferAlternate)
-        check("⌘R restores normal cursor keys", !terminal.applicationCursor)
         await type("echo after-reset\r")
         check("shell still works after ⌘R", await until { self.hasLine(tab1, "after-reset") }, tail(tab1))
+
+        // ⌘R after a program like Claude Code (kitty keyboard on the main
+        // screen) or tmux over a dropped SSH connection (alternate screen).
+        await type("clear; seq 1 5; printf '\\e[>1u\\e[?2004h\\e[5 q'\r")
+        check("program can enable the kitty keyboard", await until { !terminal.keyboardEnhancementFlags.isEmpty }, tail(tab1))
+        await sleep(0.3)
+        let rowBefore = terminal.buffer.y
+        await key(kVK_ANSI_R, .command)
+        check("⌘R turns off the kitty keyboard", await until { terminal.keyboardEnhancementFlags.isEmpty })
+        await sleep(0.4)
+        check("⌘R keeps the cursor below existing text", terminal.buffer.y >= rowBefore,
+              "before \(rowBefore), after \(terminal.buffer.y)\n\(tail(tab1))")
+        await type("sleep 30\r")
+        await sleep(0.5)
+        await key(kVK_ANSI_C, .control)
+        await type("echo after-kitty\r")
+        check("⌃C works after ⌘R", await until { self.hasLine(tab1, "after-kitty") }, tail(tab1))
+        check("lines above the prompt are untouched", ["1", "2", "3", "4", "5"].allSatisfy { self.hasLine(tab1, $0) }, text(tab1))
+
+        await type("echo before-ssh; printf '\\e[?1049h\\e[>1u\\e[?1003h\\e[?1h'; echo 'Connection closed.'\r")
+        _ = await until { terminal.isCurrentBufferAlternate && !terminal.keyboardEnhancementFlags.isEmpty }
+        await sleep(0.3)
+        await key(kVK_ANSI_R, .command)
+        check("⌘R leaves the alternate screen with the kitty keyboard off",
+              await until { !terminal.isCurrentBufferAlternate && terminal.keyboardEnhancementFlags.isEmpty && terminal.mouseMode == .off })
+        await type("echo after-ssh\r")
+        check("shell works after a dropped connection and ⌘R", await until { self.hasLine(tab1, "after-ssh") }, tail(tab1))
+        check("text before the program is untouched", hasLine(tab1, "before-ssh"), tail(tab1))
+        log("  terminal after ⌘R:\n\(tail(tab1))")
 
         // Mouse wheel reporting
         await type("printf '\\e[?1000h\\e[?1006h'; cat -v\r")
@@ -328,8 +356,20 @@ final class SelfTest {
         await type("echo popped\r")
         check("pop-out terminal works", await until { self.hasLine(detached, "popped") }, tail(detached))
         await screenshot("08-popout")
-        popout?.performClose(nil)
-        check("closing the pop-out window closes it", await until { popout?.isVisible == false })
+
+        settings.update { $0.general.hideFromScreenSharing = true }
+        check("hiding from screen sharing applies to pop-outs", await until { popout?.sharingType == NSWindow.SharingType.none })
+        let popoutFrame = popout?.frame
+        settings.update { $0.general.hideFromScreenSharing = false }
+        let shared = detached.view.window
+        check("pop-out can be shared again", await until { detached.view.window?.sharingType == .readOnly }, "\(String(describing: detached.view.window?.sharingType.rawValue))")
+        check("pop-out keeps its place", shared?.frame == popoutFrame && shared?.isVisible == true && popout?.isVisible == false)
+        check("pop-out shell survives", await until { shared?.isKeyWindow == true && shared?.firstResponder === detached.view })
+        await type("echo still-here\r")
+        check("pop-out terminal works after sharing is turned back on", await until { self.hasLine(detached, "still-here") }, tail(detached))
+
+        shared?.performClose(nil)
+        check("closing the pop-out window closes it", await until { shared?.isVisible == false })
 
         // Reopen keeps state
         await sleep(0.5)
@@ -714,6 +754,12 @@ final class SelfTest {
         await screenshot("16-hidden-from-capture")
         settings.update { $0.general.hideFromScreenSharing = false }
         check("sharing can be turned back on", await until { notch.panel.sharingType == .readOnly })
+        check("notch stays open after sharing is turned back on", notch.isOpen && notch.panel.isVisible)
+        check("terminal moved into the shareable panel", tab1.view.window === notch.panel)
+        check("the old panel is gone", NSApp.windows.filter { $0 is NotchPanel && $0.isVisible }.count == model.coordinator.controllers.count)
+        check("terminal keeps the keyboard", await until { notch.isKey && notch.panel.firstResponder === tab1.view })
+        await type("echo shared-again\r")
+        check("terminal works after sharing is turned back on", await until { self.hasLine(tab1, "shared-again") }, tail(tab1))
 
         // Translucent background
         settings.update { $0.appearance.backgroundOpacity = 0.6 }

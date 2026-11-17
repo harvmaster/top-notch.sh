@@ -223,16 +223,34 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable {
 
     // MARK: - Commands
 
-    /// Restores sane input state after a program exits without cleaning up:
-    /// stray mouse reports, bracketed paste, application cursor keys and the
-    /// alternate screen. The shell itself is not touched.
+    /// Puts the terminal back the way the shell expects it, after a program
+    /// exits without cleaning up (for example when an SSH connection drops):
+    /// keyboard and mouse modes, bracketed paste, cursor keys, the alternate
+    /// screen, scroll region, colours and cursor style. If the shell is at its
+    /// prompt, it is asked for a fresh one, just like pressing ⌃C.
     func resetInputModes() {
-        view.feed(byteArray: TerminalModes.resetSequence[...])
-        view.getTerminal().softReset()
+        resetDisplayState()
         view.selectNone()
         scrollFollow.reset()
         view.scroll(toPosition: 1)
         updateScrollerVisibility()
+
+        if let process, process.shellPid > 0, !isRunningCommand {
+            kill(process.shellPid, SIGINT)
+        }
+    }
+
+    /// Resets the terminal's own state without touching the shell.
+    private func resetDisplayState() {
+        let terminal = view.getTerminal()
+        view.feed(byteArray: TerminalModes.resetSequence(inAlternateScreen: terminal.isCurrentBufferAlternate)[...])
+        terminal.softReset()
+        let terminalSettings = appliedSettings ?? settings.settings.terminal
+        terminal.setCursorStyle(CursorStyle(terminalSettings.cursorShape, blinks: terminalSettings.cursorBlinks))
+        // Start on a clean line, so the next prompt doesn't land in old text.
+        if terminal.buffer.x > 0 {
+            view.feed(text: "\r\n")
+        }
     }
 
     /// The scroller only appears while the user is reading scrollback; at the
@@ -400,7 +418,7 @@ extension TerminalSession: LocalProcessDelegate {
     nonisolated func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
         Task { @MainActor in
             self.process = nil
-            self.view.feed(byteArray: TerminalModes.resetSequence[...])
+            self.resetDisplayState()
             self.onExit?()
         }
     }
