@@ -357,19 +357,9 @@ final class SelfTest {
         check("pop-out terminal works", await until { self.hasLine(detached, "popped") }, tail(detached))
         await screenshot("08-popout")
 
-        settings.update { $0.general.hideFromScreenSharing = true }
-        check("hiding from screen sharing applies to pop-outs", await until { popout?.sharingType == NSWindow.SharingType.none })
-        let popoutFrame = popout?.frame
-        settings.update { $0.general.hideFromScreenSharing = false }
-        let shared = detached.view.window
-        check("pop-out can be shared again", await until { detached.view.window?.sharingType == .readOnly }, "\(String(describing: detached.view.window?.sharingType.rawValue))")
-        check("pop-out keeps its place", shared?.frame == popoutFrame && shared?.isVisible == true && popout?.isVisible == false)
-        check("pop-out shell survives", await until { shared?.isKeyWindow == true && shared?.firstResponder === detached.view })
-        await type("echo still-here\r")
-        check("pop-out terminal works after sharing is turned back on", await until { self.hasLine(detached, "still-here") }, tail(detached))
-
-        shared?.performClose(nil)
-        check("closing the pop-out window closes it", await until { shared?.isVisible == false })
+        await checkScreenSharing(of: popout, name: "a pop-out")
+        popout?.performClose(nil)
+        check("closing the pop-out window closes it", await until { popout?.isVisible == false })
 
         // Reopen keeps state
         await sleep(0.5)
@@ -749,17 +739,8 @@ final class SelfTest {
         check("⌘⇧P unpins", await until { !notch.isPinned })
 
         // Hide from screen sharing
-        settings.update { $0.general.hideFromScreenSharing = true }
-        check("hiding from screen sharing applies to the notch", await until { notch.panel.sharingType == NSWindow.SharingType.none })
-        await screenshot("16-hidden-from-capture")
-        settings.update { $0.general.hideFromScreenSharing = false }
-        check("sharing can be turned back on", await until { notch.panel.sharingType == .readOnly })
-        check("notch stays open after sharing is turned back on", notch.isOpen && notch.panel.isVisible)
-        check("terminal moved into the shareable panel", tab1.view.window === notch.panel)
-        check("the old panel is gone", NSApp.windows.filter { $0 is NotchPanel && $0.isVisible }.count == model.coordinator.controllers.count)
-        check("terminal keeps the keyboard", await until { notch.isKey && notch.panel.firstResponder === tab1.view })
-        await type("echo shared-again\r")
-        check("terminal works after sharing is turned back on", await until { self.hasLine(tab1, "shared-again") }, tail(tab1))
+        await checkScreenSharing(of: notch.panel, name: "the notch")
+        await screenshot("16-shared-again")
 
         // Translucent background
         settings.update { $0.appearance.backgroundOpacity = 0.6 }
@@ -1035,6 +1016,37 @@ final class SelfTest {
             await sleep(0.05)
         }
         return condition()
+    }
+
+    /// Turns "Hide from Screen Sharing" on and off and checks the window
+    /// really disappears from screen captures and comes back. Without
+    /// screen-recording permission AppKit keeps reporting a window as hidden
+    /// after it is shared again, so only a real capture can tell.
+    private func checkScreenSharing(of window: NSWindow?, name: String) async {
+        guard let window else { return check("\(name) can be hidden from screen sharing", false) }
+        model.settings.update { $0.general.hideFromScreenSharing = true }
+        check("hiding from screen sharing applies to \(name)", await until { window.sharingType == NSWindow.SharingType.none })
+        guard CGPreflightScreenCaptureAccess() else {
+            model.settings.update { $0.general.hideFromScreenSharing = false }
+            return log("  (no screen-recording permission: skipped capture checks for \(name))")
+        }
+        await sleep(0.3)
+        check("\(name) is missing from screen captures while hidden", !capture(window))
+        model.settings.update { $0.general.hideFromScreenSharing = false }
+        await sleep(0.3)
+        check("\(name) shows in screen captures again", capture(window))
+    }
+
+    private func capture(_ window: NSWindow) -> Bool {
+        let file = output.appendingPathComponent("sharing-capture.png")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        process.arguments = ["-x", "-o", "-l", String(window.windowNumber), file.path]
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        process.waitUntilExit()
+        defer { try? FileManager.default.removeItem(at: file) }
+        return process.terminationStatus == 0 && FileManager.default.fileExists(atPath: file.path)
     }
 
     private func screenshot(_ name: String) async {

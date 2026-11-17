@@ -93,18 +93,14 @@ final class PopoutWindows: NSObject, NSWindowDelegate {
         self.settings = settings
         super.init()
         sharingSubscription = settings.publisher(\.general.hideFromScreenSharing)
-            .sink { [weak self] in self?.setHiddenFromScreenSharing($0) }
+            .sink { [weak self] hidden in
+                self?.windows.values.forEach { $0.sharingType = hidden ? .none : .readOnly }
+            }
     }
 
     func open(_ session: TerminalSession) {
-        let window = makeWindow(for: session, frame: NSRect(x: 0, y: 0, width: 760, height: 460))
-        window.center()
-        ActivationPolicy.present(window)
-    }
-
-    private func makeWindow(for session: TerminalSession, frame: NSRect) -> NSWindow {
         let window = NSWindow(
-            contentRect: frame,
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 460),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -112,7 +108,7 @@ final class PopoutWindows: NSObject, NSWindowDelegate {
         window.appearance = NSAppearance(named: .darkAqua)
         window.isOpaque = false
         window.backgroundColor = .clear
-        window.setHiddenFromScreenSharing(settings.settings.general.hideFromScreenSharing)
+        window.sharingType = settings.settings.general.hideFromScreenSharing ? .none : .readOnly
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
         window.delegate = self
@@ -124,30 +120,9 @@ final class PopoutWindows: NSObject, NSWindowDelegate {
         subscriptions[key] = session.$title.combineLatest(session.$customName)
             .sink { [weak window] title, name in window?.title = name ?? title }
         session.onExit = { [weak window] in window?.close() }
-        return window
-    }
 
-    /// macOS won't let a hidden window be shared again, so each one is
-    /// swapped for a new window showing the same terminal.
-    private func setHiddenFromScreenSharing(_ hidden: Bool) {
-        for (key, window) in windows where !window.setHiddenFromScreenSharing(hidden) {
-            guard let session = sessions.removeValue(forKey: key) else { continue }
-            let wasKey = window.isKeyWindow
-            windows[key] = nil
-            subscriptions[key] = nil
-            window.delegate = nil
-            window.contentView = nil
-            let replacement = makeWindow(for: session, frame: window.frame)
-            replacement.setFrame(window.frame, display: false)
-            if wasKey {
-                replacement.makeKeyAndOrderFront(nil)
-                session.focus()
-            } else {
-                replacement.orderFront(nil)
-            }
-            window.orderOut(nil)
-            window.close()
-        }
+        window.center()
+        ActivationPolicy.present(window)
     }
 
     /// Terminals living in pop-out windows.
@@ -177,16 +152,5 @@ private struct PopoutView: View {
             .padding(.vertical, 6)
             .background(PanelBackground(color: settingsStore.settings.terminal.theme.palette.backgroundColor))
             .frame(minWidth: 320, minHeight: 160)
-    }
-}
-
-extension NSWindow {
-    /// Hides the window from screen sharing and recordings, or shows it again.
-    /// Returns `false` if macOS refused: on macOS 26 a window that has been
-    /// hidden can't be made shareable again.
-    @discardableResult
-    func setHiddenFromScreenSharing(_ hidden: Bool) -> Bool {
-        sharingType = hidden ? .none : .readOnly
-        return (sharingType == .none) == hidden
     }
 }
